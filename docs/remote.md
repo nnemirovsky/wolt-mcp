@@ -10,8 +10,15 @@ What changes compared to stdio:
 
 - **Transport** is Streamable HTTP at `/mcp`, stateless: every request builds a fresh server, nothing is kept between calls, and restarts are invisible to clients. There is no session to resume, so `GET /mcp` answers 405.
 - **Auth** is OAuth 2.1, served by wolt-mcp itself (see below). Clients discover it from the 401 on `/mcp`, register themselves, send you to an approve page once, and hold a bearer token from then on.
-- **Browser login is gone.** A server has no Chrome to drive, so `login_via_chrome` is not offered. Connect the Wolt account by running `npx -y wolt-mcp login` on your own computer — it opens the usual browser login and prints a refresh token — and pasting that token to the remote server with `set_wolt_token` in chat. Or copy your local `~/.wolt-mcp/tokens.json` into the server's state directory.
-- **One server per Wolt account.** Wolt's refresh tokens rotate, and two servers refreshing from the same chain eventually trip over each other. Once the remote one works, point your desktop clients at the URL too instead of running stdio copies alongside it.
+- **Browser login is gone.** A server has no Chrome to drive, so `login_via_chrome` is not offered. Get a Wolt refresh token by running `npx -y wolt-mcp login` on your own computer — it opens the usual browser login and prints the token — and paste it either on the approve page when you connect a client (see below) or later in chat with `set_wolt_token`.
+- **Location is per account, never guessed.** Locally the first search falls back to a city-level guess from your IP. A server's IP says where the server is, so remotely there is no guess: each account starts with no location and the model asks, or pulls it with `use_saved_address`.
+- **One consumer per Wolt refresh chain.** Wolt's refresh tokens rotate, and two processes refreshing from the same chain eventually trip over each other. Once the remote server works, point your desktop clients at the URL too instead of running stdio copies alongside it; different accounts, or separate logins of the same account, are independent chains and coexist fine.
+
+## Wolt accounts per connection
+
+Every OAuth grant can carry its own Wolt account. The approve page has a **Wolt refresh token** field: paste one and the token is exchanged once right there (a bad paste fails on the page, not at the first tool call), the grant gets a private slot under `<state dir>/accounts/<id>/` with its own `tokens.json` and `config.json`, and every tool call made with that grant — including its refreshes — reads and writes only that slot. Leave the field empty and the grant uses the server's own account, the one the operator connected in the state directory root. When the server has no account of its own yet, the field is shown open; otherwise it is folded behind "Use a different Wolt account for this connection".
+
+So one server can serve several people in several countries, each with their own Wolt login, address and currency, as long as each of them can pass the approve-page guard. Fixed `WOLT_API_TOKENS` bearers always use the server's own account.
 
 ## Configuration
 
@@ -52,7 +59,7 @@ Tool annotations are set so clients know what each tool does before calling it: 
    cp .env.example .env   # fill in WOLT_PUBLIC_URL, the Access team + AUD, the tunnel token
    docker compose up -d --build
    ```
-4. Connect the Wolt account: run `npx -y wolt-mcp login` on your computer and paste the printed refresh token to the server via `set_wolt_token` from any connected client — or copy `~/.wolt-mcp/tokens.json` into the `wolt-data` volume.
+4. Connect a Wolt account: run `npx -y wolt-mcp login` on your computer and paste the printed refresh token on the approve page when you connect your first client (that gives the grant its own account), or copy `~/.wolt-mcp/tokens.json` into the `wolt-data` volume to give the server a default account that grants without a paste share.
 
 Check it: `curl -i https://wolt.example.com/mcp -X POST` should return 401 with a `WWW-Authenticate` header, and an anonymous `curl -i https://wolt.example.com/authorize` should redirect to your `cloudflareaccess.com` login.
 

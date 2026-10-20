@@ -26,7 +26,7 @@ import {
 import { woltFetch } from "./lib/http.js";
 import { rankCandidates } from "./lib/match.js";
 import { parseIngredientLine } from "./lib/recipe.js";
-import { setTokens, describeTokens, getAccessToken, exportRefreshToken } from "./lib/auth.js";
+import { setTokens, describeTokens, getAccessToken, exportRefreshToken, isRemoteMode } from "./lib/auth.js";
 import { serveHttp, parseHttpArgs } from "./lib/remote.js";
 import { getLocation, setLocation, estimateLocation } from "./lib/config.js";
 import { checkoutPreview } from "./lib/checkout.js";
@@ -56,7 +56,9 @@ async function marketLanguageFields(lat, lon) {
 // when nothing is available so the model asks the user instead of guessing.
 async function needLocation(lat, lon) {
   if (lat != null && lon != null) return { lat, lon };
-  const loc = getLocation() || await estimateLocation();
+  // A server's public IP says where the server is, not the user — remotely
+  // the model has to ask (or pull the saved Wolt address) instead.
+  const loc = getLocation() || (isRemoteMode() ? null : await estimateLocation());
   if (!loc) throw new Error("No delivery location is set and IP detection failed. Ask the user for their address and call set_location, or call use_saved_address to use their saved Wolt addresses.");
   return { lat: lat ?? loc.lat, lon: lon ?? loc.lon };
 }

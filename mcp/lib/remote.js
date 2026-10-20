@@ -25,8 +25,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { OAuthProvider, OAuthError } from "./oauth.js";
-import { setRemoteMode } from "./auth.js";
+import { OAuthProvider, OAuthError, newAccountId } from "./oauth.js";
+import { setRemoteMode, validateRefreshToken, adoptTokens, describeTokens } from "./auth.js";
+import { withStateDir, accountStateDir } from "./context.js";
 
 const DEFAULT_STATIC_REDIRECTS = [
   "https://chatgpt.com/connector_platform_oauth_redirect",
@@ -145,10 +146,12 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
       res.setHeader("Allow", "POST, OPTIONS");
       return sendJson(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed: this server is stateless, use POST" }, id: null });
     }
+    let grant = null; // the OAuth token record; API tokens use the server's own account
     if (provider || cfg.apiTokens.length) {
       const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
       const presented = m ? m[1].trim() : null;
-      const ok = presented && (isApiToken(presented) || (provider && provider.verifyBearer(presented)));
+      if (presented && !isApiToken(presented) && provider) grant = provider.verifyBearer(presented);
+      const ok = presented && (isApiToken(presented) || grant);
       if (!ok) {
         if (!provider) {
           res.setHeader("WWW-Authenticate", 'Bearer realm="wolt-mcp"');
@@ -159,11 +162,17 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
         return sendJson(res, 401, { error: m ? "invalid_token" : "unauthorized", error_description: "This MCP server needs an OAuth bearer token." });
       }
     }
-    const mcpServer = buildServer({ remote: true });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-    res.on("close", () => { mcpServer.close().catch(() => {}); });
-    await mcpServer.connect(transport);
-    await transport.handleRequest(req, res);
+    // Everything the tools read or write (Wolt tokens, saved location) is
+    // resolved against this grant's account directory for the whole request.
+    let stateDir;
+    try { stateDir = accountStateDir(cfg.stateDir, grant?.accountId); } catch (e) { return sendJson(res, 401, { error: "invalid_token", error_description: "token refers to an unknown account" }); }
+    await withStateDir(stateDir, async () => {
+      const mcpServer = buildServer({ remote: true });
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on("close", () => { mcpServer.close().catch(() => {}); });
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res);
+    });
   }
 
   async function authorize(req, res, url) {
@@ -205,7 +214,24 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     // GET under Cloudflare Access: the human is verified, now ask them.
     // GET with the secret guard: the form is the question.
     if (req.method === "GET" || !verdict.ok || !body.approve) return consentPage(res, request, q, null);
-    return redirect(res, provider.issueCode({ ...request, who: verdict.who }));
+
+    // An optional Wolt refresh token gives this grant its own account slot.
+    // It is exchanged once right here, so a bad paste is caught on the page
+    // rather than at the first tool call, and the rotation is stored too.
+    let accountId = null;
+    const pasted = String(body.wolt_token || "").trim();
+    if (pasted) {
+      let validated;
+      try {
+        validated = await validateRefreshToken(pasted);
+      } catch (e) {
+        recordFailure(ip);
+        return consentPage(res, request, q, `Wolt did not accept that refresh token (${e.message}). Get a fresh one with npx -y wolt-mcp login and try again.`);
+      }
+      accountId = newAccountId();
+      withStateDir(accountStateDir(cfg.stateDir, accountId), () => adoptTokens(validated));
+    }
+    return redirect(res, provider.issueCode({ ...request, who: verdict.who, accountId }));
   }
 
   async function token(req, res) {
@@ -232,12 +258,21 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     const field = `<input type="hidden" name="approve" value="1">` + (cfg.guard.type === "secret"
       ? `<label>Approve secret<br><input type="password" name="secret" autocomplete="current-password" autofocus required></label>`
       : "");
+    // Which Wolt account the connection will use. If the server has none
+    // connected yet the paste field is the main event; otherwise it is folded
+    // away behind "use a different account".
+    const serverHasAccount = withStateDir(cfg.stateDir, () => describeTokens().refreshTokenStored);
+    const tokenInput = `<label>Wolt refresh token<br><input type="password" name="wolt_token" autocomplete="off" spellcheck="false"></label>` +
+      `<p class="muted">Run <code>npx -y wolt-mcp login</code> on your computer; it opens the Wolt login in a browser and prints the token. The token is exchanged once now and renews itself afterwards.</p>`;
+    const account = serverHasAccount
+      ? `<details><summary>Use a different Wolt account for this connection</summary><p class="muted">Leave empty to use the Wolt account already connected to this server.</p>${tokenInput}</details>`
+      : `<p><b>This server has no Wolt account connected yet.</b> Paste a refresh token to connect one for this connection (searching works without it; baskets and orders don't).</p>${tokenInput}`;
     // form-action also governs where a form POST may be *redirected*, so the
     // client's callback origin has to be allowed or the browser drops the code.
     return page(res, error ? 403 : 200, "Allow access to your Wolt account?",
       `<p><b>${esc(request.client.name)}</b> <span class="muted">(${esc(host)})</span> wants to use this wolt-mcp server: search, your baskets, order history and favourites on the connected Wolt account.</p>` +
       (error ? `<p class="err">${esc(error)}</p>` : "") +
-      `<form method="post" action="/authorize">${hidden}${field}<p><button type="submit">Allow</button></p></form>`,
+      `<form method="post" action="/authorize">${hidden}${field}${account}<p><button type="submit">Allow</button></p></form>`,
       { formAction: new URL(request.redirectUri).origin });
   }
 
@@ -293,7 +328,7 @@ function page(res, status, title, bodyHtml, { formAction } = {}) {
   const csp = `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formAction ? ` ${formAction}` : ""}; frame-ancestors 'none'`;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": csp });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — wolt-mcp</title>` +
-    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}</style></head>` +
+    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}details{margin:1rem 0}summary{cursor:pointer}code{font-size:.9em}</style></head>` +
     `<body><h1>${esc(title)}</h1>${bodyHtml}<p class="muted">wolt-mcp</p></body></html>`);
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

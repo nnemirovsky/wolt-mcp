@@ -18,6 +18,7 @@ mcp/lib/
   config.js        saved location
   remote.js        Streamable HTTP transport (stateless) and its routes
   oauth.js         the OAuth 2.1 server in front of it, Cloudflare Access JWT check
+  context.js       per-request state directory (one Wolt account per OAuth grant)
 deploy/            Dockerfile, compose file with a Cloudflare Tunnel connector
 ```
 
@@ -89,7 +90,9 @@ a silent pricing bug, not a recoverable one.
 
 `--http` serves the same tools over Streamable HTTP at `/mcp`, stateless: a fresh `McpServer` plus transport per request, torn down when the response closes. No session ids, so there is nothing to lose across restarts and `GET /mcp` is a 405. Only `login_via_chrome` is withheld — a server has no browser — and the token-setup message points at `npx -y wolt-mcp login` on the user's own machine instead.
 
-Auth is OAuth 2.1 served by `oauth.js`: protected-resource and authorization-server metadata, open dynamic client registration, PKCE-only authorization codes (in memory, ten minutes, single use), opaque bearer and rotating refresh tokens stored hashed in `oauth.json`. The human check sits on `/authorize` and is one of two guards: Cloudflare Access in front of that path (the server verifies the `Cf-Access-Jwt-Assertion` RS256 JWT against the team's JWKS — signature, issuer, audience, expiry) or a shared approve secret. Either way the user clicks Allow on a same-origin form; auto-approval would let any registered client lift a code from a logged-in browser. `WOLT_API_TOKENS` adds fixed bearer tokens for header-only clients. Details and deployment in [remote.md](remote.md).
+Auth is OAuth 2.1 served by `oauth.js`: protected-resource and authorization-server metadata, open dynamic client registration, PKCE-only authorization codes (in memory, ten minutes, single use), opaque bearer and rotating refresh tokens stored hashed in `oauth.json`. The human check sits on `/authorize` and is one of two guards: Cloudflare Access in front of that path (the server verifies the `Cf-Access-Jwt-Assertion` RS256 JWT against the team's JWKS — signature, issuer, audience, expiry) or a shared approve secret. Either way the user clicks Allow on a same-origin form; auto-approval would let any registered client lift a code from a logged-in browser. `WOLT_API_TOKENS` adds fixed bearer tokens for header-only clients.
+
+A grant can carry its own Wolt account: a refresh token pasted on the approve page is exchanged once, stored under `accounts/<id>/` in the state dir, and the id travels on the grant's tokens through every refresh. `context.js` holds the request's state directory in an `AsyncLocalStorage`; `auth.js` and `config.js` resolve their files through it instead of constants, so tokens and the saved location are per account without the tool code knowing. Remotely the IP-based location guess is off — it would point at the server. Details and deployment in [remote.md](remote.md).
 
 ## Testing
 

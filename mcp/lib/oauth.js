@@ -39,6 +39,8 @@ function safeEqual(a, b) {
   return A.length === B.length && A.length > 0 && timingSafeEqual(A, B);
 }
 
+export const newAccountId = () => randomToken(12);
+
 export class OAuthError extends Error {
   constructor(status, error, description) {
     super(description || error);
@@ -196,9 +198,9 @@ export class OAuthProvider {
     return { client, redirectUri, codeChallenge: q.code_challenge, state: q.state || null, scope: q.scope || "wolt" };
   }
 
-  issueCode({ client, redirectUri, codeChallenge, state, scope, who }) {
+  issueCode({ client, redirectUri, codeChallenge, state, scope, who, accountId = null }) {
     const code = randomToken(32);
-    this.codes.set(code, { clientId: client.clientId, redirectUri, codeChallenge, scope, who: who || null, exp: this.now() + CODE_TTL_MS });
+    this.codes.set(code, { clientId: client.clientId, redirectUri, codeChallenge, scope, who: who || null, accountId, exp: this.now() + CODE_TTL_MS });
     for (const [k, v] of this.codes) if (v.exp <= this.now()) this.codes.delete(k);
     return redirectWith(redirectUri, { code, ...(state ? { state } : {}) });
   }
@@ -242,7 +244,7 @@ export class OAuthProvider {
       if (rec.clientId !== client.clientId) throw new OAuthError(400, "invalid_grant", "authorization code was issued to another client");
       if (params.redirect_uri && params.redirect_uri !== rec.redirectUri) throw new OAuthError(400, "invalid_grant", "redirect_uri does not match the authorization request");
       if (!params.code_verifier || !safeEqual(sha256(params.code_verifier), rec.codeChallenge)) throw new OAuthError(400, "invalid_grant", "PKCE verification failed");
-      return this.issueTokens(client, rec.scope, rec.who);
+      return this.issueTokens(client, rec.scope, rec.who, rec.accountId);
     }
     if (params.grant_type === "refresh_token") {
       const h = sha256(params.refresh_token || "");
@@ -254,16 +256,18 @@ export class OAuthProvider {
         throw new OAuthError(400, "invalid_grant", "refresh token was already rotated");
       }
       if (!rec.supersededAt) rec.supersededAt = now;
-      return this.issueTokens(client, rec.scope, rec.who);
+      return this.issueTokens(client, rec.scope, rec.who, rec.accountId);
     }
     throw new OAuthError(400, "unsupported_grant_type", "use authorization_code or refresh_token");
   }
 
-  issueTokens(client, scope, who) {
+  // accountId: which Wolt account slot this grant uses (null = the server's
+  // own). It is fixed at approval time and survives every refresh.
+  issueTokens(client, scope, who, accountId = null) {
     const access = randomToken(32), refresh = randomToken(32);
     const now = this.now();
-    this.state.tokens[sha256(access)] = { clientId: client.clientId, scope, who, exp: now + ACCESS_TOKEN_TTL_S * 1000, issuedAt: now };
-    this.state.refreshTokens[sha256(refresh)] = { clientId: client.clientId, scope, who, exp: now + REFRESH_TOKEN_TTL_S * 1000, issuedAt: now };
+    this.state.tokens[sha256(access)] = { clientId: client.clientId, scope, who, accountId, exp: now + ACCESS_TOKEN_TTL_S * 1000, issuedAt: now };
+    this.state.refreshTokens[sha256(refresh)] = { clientId: client.clientId, scope, who, accountId, exp: now + REFRESH_TOKEN_TTL_S * 1000, issuedAt: now };
     this.save();
     return { access_token: access, token_type: "bearer", expires_in: ACCESS_TOKEN_TTL_S, refresh_token: refresh, scope };
   }
