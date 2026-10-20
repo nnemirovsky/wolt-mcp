@@ -105,6 +105,7 @@ try {
   r = await get(`/authorize?${new URLSearchParams(authz)}`);
   assert.equal(r.status, 200, "GET /authorize renders the approve page");
   const html = await r.text();
+  let html2;
   assert.match(html, /test client/);
   // The browser enforces form-action on the redirect that follows the POST,
   // so the client's callback origin must be allowed alongside 'self'.
@@ -189,7 +190,7 @@ try {
   assert.equal(tools.find((t) => t.name === "search_products").annotations.readOnlyHint, true);
   assert.equal(tools.find((t) => t.name === "add_to_cart").annotations.readOnlyHint, false);
   assert.equal(tools.find((t) => t.name === "clear_basket").annotations.destructiveHint, true);
-  assert.match(client.getInstructions(), /npx -y wolt-mcp login/, "remote instructions point at the local login helper");
+  assert.match(client.getInstructions(), /wauth2\/access_token/, "remote instructions explain where the refresh token comes from");
   assert.equal(client.getServerVersion()?.version, VERSION);
   await client.close();
 
@@ -231,13 +232,16 @@ try {
   // remotely the IP is never used as a location guess either.
   let st = await statusVia(API_TOKEN);
   assert.equal(st.loginNeeded, true);
-  assert.match(st.loginDetail, /npx -y wolt-mcp login/, "remote setup message names the local login helper");
+  assert.match(st.loginDetail, /developer tools/, "remote setup message explains the DevTools route");
   assert.match(st.stateFile, /\/accounts\/api-[A-Za-z0-9_-]{16}\/tokens\.json$/, "API tokens get their own slot");
   assert.equal(st.location.label, "not set (estimated from IP on first search)");
   assert(!existsSync(join(stateDir, "tokens.json")), "the state dir root never holds an account");
   // The approve page requires a Wolt token; an approval without one is refused.
   r = await get(`/authorize?${new URLSearchParams(authz)}`);
-  assert.match(await r.text(), /name="wolt_token"[^>]*required/);
+  html2 = await r.text();
+  assert.match(html2, /name="wolt_token"[^>]*required/);
+  assert.match(html2, /authentication\.wolt\.com\/v1\/wauth2\/access_token/, "the page explains the DevTools route");
+  assert.match(html2, /<details>.*For developers.*server\.mjs login/s, "the CLI route is folded away");
   r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl } });
   assert.equal(r.status, 403, "no Wolt token, no grant");
   assert.match(await r.text(), /refresh token is required/);

@@ -243,7 +243,7 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
       validated = await validateRefreshToken(pasted);
     } catch (e) {
       recordFailure(ip);
-      return consentPage(res, request, q, `Wolt did not accept that refresh token (${e.message}). Get a fresh one with npx -y wolt-mcp login and try again.`);
+      return consentPage(res, request, q, `Wolt did not accept that refresh token (${e.message}). Copy a fresh one from a logged-in wolt.com tab and try again.`);
     }
     const accountId = newAccountId();
     withStateDir(accountStateDir(cfg.stateDir, accountId), () => adoptTokens(validated));
@@ -277,7 +277,11 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     // The connection's own Wolt account. The server holds none to share, so
     // the token is required — the page is the whole account setup.
     const account = `<label>Your Wolt refresh token<br><input type="password" name="wolt_token" autocomplete="off" spellcheck="false" required></label>` +
-      `<p class="muted">Run <code>npx -y wolt-mcp login</code> on your computer; it opens the Wolt login in a browser and prints the token. It is exchanged once now and renews itself afterwards; this connection uses only the account it belongs to.</p>`;
+      `<ol class="muted"><li>Log in at <a href="https://wolt.com" target="_blank" rel="noopener">wolt.com</a>.</li>` +
+      `<li>Open the browser's developer tools (F12 or ⌥⌘I), Network tab, and reload the page.</li>` +
+      `<li>Find the request to <code>authentication.wolt.com/v1/wauth2/access_token</code> and copy the <code>refresh_token</code> value from its JSON.</li></ol>` +
+      `<p class="muted">The token is exchanged once now and renews itself afterwards; this connection uses only the account it belongs to.</p>` +
+      `<details><summary class="muted">For developers</summary><p class="muted">From a checkout of wolt-mcp, <code>node mcp/server.mjs login</code> opens the Wolt login in a separate browser profile and prints the token (<code>npx -y wolt-mcp login</code> once a release ships it).</p></details>`;
     // form-action also governs where a form POST may be *redirected*, so the
     // client's callback origin has to be allowed or the browser drops the code.
     return page(res, error ? 403 : 200, "Allow access to your Wolt account?",
@@ -339,7 +343,7 @@ function page(res, status, title, bodyHtml, { formAction } = {}) {
   const csp = `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formAction ? ` ${formAction}` : ""}; frame-ancestors 'none'`;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": csp });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — wolt-mcp</title>` +
-    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}code{font-size:.9em}</style></head>` +
+    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}code{font-size:.9em}ol{padding-left:1.2rem}details{margin:1rem 0}summary{cursor:pointer}a{color:inherit}</style></head>` +
     `<body><h1>${esc(title)}</h1>${bodyHtml}<p class="muted">wolt-mcp</p></body></html>`);
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

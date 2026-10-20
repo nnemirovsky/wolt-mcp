@@ -10,7 +10,7 @@ What changes compared to stdio:
 
 - **Transport** is Streamable HTTP at `/mcp`, stateless: every request builds a fresh server, nothing is kept between calls, and restarts are invisible to clients. There is no session to resume, so `GET /mcp` answers 405.
 - **Auth** is OAuth 2.1, served by wolt-mcp itself (see below). Clients discover it from the 401 on `/mcp`, register themselves, send you to an approve page once, and hold a bearer token from then on.
-- **Browser login is gone.** A server has no Chrome to drive, so `login_via_chrome` is not offered. Get a Wolt refresh token by running `npx -y wolt-mcp login` on your own computer — it opens the usual browser login and prints the token — and paste it either on the approve page when you connect a client (see below) or later in chat with `set_wolt_token`.
+- **Browser login is gone.** A server has no Chrome to drive, so `login_via_chrome` is not offered. The approve page asks for a Wolt refresh token instead: log in at wolt.com, open the browser's developer tools → Network, reload, find the request to `authentication.wolt.com/v1/wauth2/access_token` and copy `refresh_token` from its JSON. (From a checkout, `node mcp/server.mjs login` automates that in a separate browser profile; `npx -y wolt-mcp login` once a release ships it.)
 - **Location is per account, never guessed.** Locally the first search falls back to a city-level guess from your IP. A server's IP says where the server is, so remotely there is no guess: each account starts with no location and the model asks, or pulls it with `use_saved_address`.
 - **One consumer per Wolt refresh chain.** Wolt's refresh tokens rotate, and two processes refreshing from the same chain eventually trip over each other. Once the remote server works, point your desktop clients at the URL too instead of running stdio copies alongside it; different accounts, or separate logins of the same account, are independent chains and coexist fine.
 
@@ -59,7 +59,7 @@ Tool annotations are set so clients know what each tool does before calling it: 
    cp .env.example .env   # fill in WOLT_PUBLIC_URL, the Access team + AUD, the tunnel token
    docker compose up -d --build
    ```
-4. Connect a client: run `npx -y wolt-mcp login` on your computer and paste the printed refresh token on the approve page. Each client connection gets its own Wolt account that way; the server never holds one of its own.
+4. Connect a client: on the approve page, paste a refresh token copied from a logged-in wolt.com tab (developer tools → Network → the `wauth2/access_token` request). Each client connection gets its own Wolt account that way; the server never holds one of its own.
 
 Check it: `curl -i https://wolt.example.com/mcp -X POST` should return 401 with a `WWW-Authenticate` header, and an anonymous `curl -i https://wolt.example.com/authorize` should redirect to your `cloudflareaccess.com` login.
 
