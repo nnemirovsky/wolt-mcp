@@ -314,12 +314,17 @@
   window.addEventListener("openai:set_globals", fromOpenAI);
   fromOpenAI();
   // Poll for late data, and never leave a silent "Loading…": after a few
-  // seconds say what the host did and didn't send, then keep polling.
+  // seconds show one quiet line (the reply next to the card has the same
+  // facts), log what the host did and didn't send, and keep polling.
   var polls = 0;
   var poller = setInterval(function () {
     if (rendered || ++polls > 60) return clearInterval(poller);
     fromOpenAI();
-    if (!rendered && polls === 8) { root.className = "muted"; root.textContent = "No data from the host yet (" + globalsSummary() + ")."; }
+    if (!rendered && polls === 8) {
+      root.className = "muted";
+      root.textContent = "The card did not load here; the details are in the reply.";
+      try { console.warn("wolt-mcp card: no data from the host (" + globalsSummary() + ")"); } catch (e) {}
+    }
   }, 500);
 })();
 </script>

@@ -29,19 +29,17 @@ export function widgetHtml() {
 }
 
 // The tools that render, with the status lines ChatGPT shows while and after
-// the call. Everything else stays text-only on purpose: a tool that changes
-// something should read as a sentence from the model, not as a card, and the
-// model's research steps (get_venue, get_venue_menu, called many times per
-// answer) would otherwise each leave a card behind; the answer's own cards
-// come from one show_picks call instead.
+// the call. Only the two results that end a turn are on the list: the
+// checkout total and the shortlist. Everything the model calls on the way
+// (searches, the feed, venue ranking, venue detail, menus, the planned cart,
+// the baskets it reads before adding or clearing) stays text-only although
+// it carries pictures: a host draws one frame per call, and ChatGPT has been
+// seen to hydrate only the last frame of a turn, leaving the earlier ones
+// blank; a basket card on every basket lookup also made "add X" answers
+// twice as long as they needed to be. The answer's own cards come from one
+// show_picks call at the end instead. A tool that changes something stays
+// text-only too; it should read as a sentence from the model, not as a card.
 export const RENDER_TOOLS = {
-  search_products: ["Searching Wolt stores…", "Products found"],
-  search_restaurant_dishes: ["Searching restaurants…", "Dishes found"],
-  plan_cart: ["Planning the cart…", "Cart planned"],
-  top_venues: ["Ranking venues nearby…", "Venues ranked"],
-  search_venues: ["Searching venues…", "Venues found"],
-  get_feed: ["Reading the feed…", "Feed loaded"],
-  get_baskets: ["Reading your baskets…", "Baskets"],
   checkout_preview: ["Pricing the basket…", "Checkout preview"],
   show_picks: ["Laying out the picks…", "Picks"]
 };
