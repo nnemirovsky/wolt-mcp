@@ -35,7 +35,7 @@ import { getVenue, getMenu, getItemOptions, getCategories, resolveItem, parseIte
 import { getOrderHistory, getOrder, geocodeAddress } from "./lib/account.js";
 import { langOf, sameScript, isNonLatinLang } from "./lib/lang.js";
 import { planAtVenue, planResponse, translationPreflight, rankPlans, mapPool } from "./lib/plan.js";
-import { rich, uiMeta, describe, registerUi, imageUrlOf } from "./lib/ui.js";
+import { rich, uiMeta, describe, registerUi, imageUrlOf, woltImageUrl, woltLinkUrl } from "./lib/ui.js";
 
 // catalogLanguage (+ a hint for non-Latin markets) for tool responses that
 // establish or report the user's location — so the model knows to translate
@@ -185,7 +185,7 @@ export const TOOL_ANNOTATIONS = {
   get_venue: READ, get_venue_menu: READ, get_venue_categories: READ, find_item: READ, get_dish_options: READ,
   get_order_history: READ, get_order: READ, resolve_address: READ, get_feed: READ, top_venues: READ,
   search_venues: READ, get_payment_methods: READ, get_favorites: READ, checkout_preview: READ,
-  get_wolt_profile: READ, wolt_status: READ,
+  get_wolt_profile: READ, wolt_status: READ, show_picks: READ,
   // These change the basket, the account, or this server's own saved state.
   use_saved_address: WRITE, add_to_cart: WRITE, update_cart_item: WRITE, add_favorite: WRITE,
   remove_favorite: WRITE, login_via_chrome: WRITE, set_wolt_token: WRITE, set_location: WRITE,
@@ -218,7 +218,7 @@ const INSTRUCTIONS = (remote) => "When the user wants to BUY something (not just
 
 export function buildServer({ remote = false } = {}) {
   const server = new McpServer({ name: "wolt-mcp", version: VERSION }, {
-    instructions: INSTRUCTIONS(remote) + " For the delivery address: use_saved_address pulls the user's saved Wolt addresses and sets one as the search location (get_wolt_profile does NOT have addresses); a spoken address goes through resolve_address + set_location. Baskets are single-venue: source every item from one store. The fast path for a shopping list is wolt_status -> use_saved_address (if no location) -> ONE plan_cart call (it auto-picks the store and reports runner-up coverage) -> review the matches -> add_to_cart -> checkout_preview. wolt_status and the address tools report the market's catalogLanguage — translate the ingredient list into it BEFORE calling plan_cart (Greek in Greece, Japanese in Japan, Hebrew in Israel, Georgian in Georgia, and so on), and write each product in dictionary form (singular nominative, like a shelf label) since catalog search matches prefixes and inflected words find little or nothing; plan_cart refuses off-language lists with needsTranslation. Don't compare stores manually with repeated searches unless the user asks, and never write a lowCoverage plan without agreeing with the user first. Pictures: items and venues come with imageUrl, Wolt's own photo on a public CDN — show those when you illustrate results, never stock or web-search images, and if you can't embed them, link them."
+    instructions: INSTRUCTIONS(remote) + " For the delivery address: use_saved_address pulls the user's saved Wolt addresses and sets one as the search location (get_wolt_profile does NOT have addresses); a spoken address goes through resolve_address + set_location. Baskets are single-venue: source every item from one store. The fast path for a shopping list is wolt_status -> use_saved_address (if no location) -> ONE plan_cart call (it auto-picks the store and reports runner-up coverage) -> review the matches -> add_to_cart -> checkout_preview. wolt_status and the address tools report the market's catalogLanguage — translate the ingredient list into it BEFORE calling plan_cart (Greek in Greece, Japanese in Japan, Hebrew in Israel, Georgian in Georgia, and so on), and write each product in dictionary form (singular nominative, like a shelf label) since catalog search matches prefixes and inflected words find little or nothing; plan_cart refuses off-language lists with needsTranslation. Don't compare stores manually with repeated searches unless the user asks, and never write a lowCoverage plan without agreeing with the user first. Pictures: items and venues come with imageUrl, Wolt's own photo on a public CDN — show those when you illustrate results, never stock or web-search images, and if you can't embed them, link them. Recommendations ('what should I eat?'): research with get_feed/top_venues and a few get_venue_menu calls, then call show_picks ONCE with the final shortlist (names, prices, imageUrl, rating, venue) so it appears as one set of photo cards; keep the prose short since the cards carry the details."
   });
   for (const t of registry) {
     if (remote && LOCAL_ONLY_TOOLS.has(t.name)) continue;
@@ -593,7 +593,12 @@ tool(
     limit: z.number().int().default(30)
   },
   async ({ venue_slug, query, category, limit }) => {
-    try { return rich("menu", { venueSlug: venue_slug, ...(await getMenu(venue_slug, { query, categorySlug: category, limit })) }); } catch (e) { return errText(e.message); }
+    try {
+      // The venue (cached) supplies the currency the prices are in; the menu
+      // alone doesn't say, and a card would otherwise guess.
+      const [menu, venue] = await Promise.all([getMenu(venue_slug, { query, categorySlug: category, limit }), getVenue(venue_slug).catch(() => null)]);
+      return rich("menu", { venueSlug: venue_slug, currency: venue?.currency ?? null, ...menu });
+    } catch (e) { return errText(e.message); }
   }
 );
 
@@ -873,6 +878,39 @@ tool(
     } catch (e) {
       return errText(e.message);
     }
+  }
+);
+
+// --- show_picks: the answer's own photo cards, one call per recommendation ---
+tool(
+  "show_picks",
+  "Present a curated shortlist (dishes, products or venues you are recommending) as ONE set of photo cards. Call it once, at the end, with the final picks — never per venue. Copy name, price (minor units) + currency, imageUrl, rating and venue from the results you got; imageUrl must be the Wolt photo from those results (other hosts are dropped) and url, if given, a wolt.com page. Does not touch Wolt. The cards offer Add and Open/Menu actions, so keep the prose around them short.",
+  {
+    title: z.string().max(120).optional().describe("Heading, e.g. 'Dinner tonight'"),
+    note: z.string().max(300).optional().describe("One line under the cards, e.g. 'Menu prices before fees'"),
+    items: z.array(z.object({
+      name: z.string().max(120),
+      description: z.string().max(200).optional(),
+      venueName: z.string().max(120).optional(),
+      venueSlug: z.string().max(120).optional(),
+      itemId: z.string().max(64).optional().describe("From the menu/search result, so the Add button can target it"),
+      price: z.number().int().nonnegative().optional().describe("Minor units, as returned by the tools"),
+      currency: z.string().length(3).optional(),
+      priceText: z.string().max(40).optional().describe("Instead of price+currency when only a formatted string is known"),
+      imageUrl: z.string().url().optional(),
+      rating: z.number().min(0).max(10).optional(),
+      eta: z.string().max(40).optional().describe("Delivery estimate as text, e.g. '30-40 min'"),
+      url: z.string().url().optional().describe("A wolt.com page for the pick (venue shareUrl)")
+    })).min(1).max(12)
+  },
+  async ({ title, note, items }) => {
+    const picks = items.map((p) => {
+      const out = { ...p };
+      if (p.imageUrl) { const u = woltImageUrl(p.imageUrl); if (u) out.imageUrl = u; else delete out.imageUrl; }
+      if (p.url) { const u = woltLinkUrl(p.url); if (u) out.url = u; else delete out.url; }
+      return out;
+    });
+    return rich("picks", { title: title ?? null, note: note ?? null, items: picks });
   }
 );
 

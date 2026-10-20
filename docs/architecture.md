@@ -100,7 +100,11 @@ Every item and venue carries an `imageUrl` (Wolt serves all images from `imagepr
 
 Feed and venue search are `auth: "optional"`: personalised when the account is connected, public otherwise, so they work before any login.
 
-The render tools' descriptions end with `IMAGE_HINT` (and the server instructions repeat it): the `imageUrl` values are Wolt's own photos and the model should show or link those rather than reach for an image search. That matters on hosts that don't draw the cards, where the model writes the whole answer and otherwise fills the picture slot with stock photos.
+The render tools' descriptions end with `IMAGE_HINT` (and the server instructions repeat it): the `imageUrl` values are Wolt's own photos and the model should show or link those rather than reach for an image search. That matters on hosts that don't draw the cards, where the model writes the whole answer and otherwise fills the picture slot with stock photos. ChatGPT's own message body never loads images from outside its storage (its `url_safe` filter strips them), so the iframe is the only place a Wolt photo shows up there.
+
+Which tools render is a deliberate short list (`RENDER_TOOLS`): the searches, the ranked venues and feed, the planned cart, baskets and the checkout preview. `get_venue` and `get_venue_menu` are text-only although they carry pictures: a recommendation calls them once per candidate, and a host that draws a card per call turned one answer into a dozen frames. Instead the answer's own cards come from `show_picks`, a tool that does not touch Wolt: the model hands it the final shortlist (name, price, `imageUrl`, rating, venue, optional item id and wolt.com link) and gets one `picks` card set back. Because those URLs come from the model, `woltImageUrl`/`woltLinkUrl` keep only Wolt's hosts; anything else is dropped before it reaches the iframe.
+
+The template looks up its root element and runs its first render only after every function it uses is defined. ChatGPT sets `window.openai.toolOutput` before the script runs, so that first render happens synchronously during setup; an earlier version rendered from inside the bridge, before `root` was assigned, and every ChatGPT card stayed on "Loading…". A render that throws now falls back to the raw data with the error on top, and a card that gets no data within a few seconds says which host path went quiet.
 
 ## Testing
 

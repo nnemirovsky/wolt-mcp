@@ -43,6 +43,10 @@
 <script>
 (function () {
   "use strict";
+  // The root comes first: ChatGPT has window.openai.toolOutput ready before
+  // this script runs, so the first render happens during the bridge setup.
+  var root = document.getElementById("root");
+  var rendered = false;
   // ---- host bridge: MCP Apps (JSON-RPC over postMessage), with ChatGPT's
   // window.openai globals as a fallback for hosts that still only speak those.
   var PROTOCOL = "2026-01-26";
@@ -69,18 +73,16 @@
     if (hostContext.theme) document.documentElement.setAttribute("data-theme", hostContext.theme);
     if (hostContext.locale) document.documentElement.lang = hostContext.locale;
   }
-  request("ui/initialize", { appInfo: { name: "wolt-mcp", version: "1" }, appCapabilities: {}, protocolVersion: PROTOCOL })
-    .then(function (res) { applyContext(res.hostContext || {}); notify("ui/notifications/initialized", {}); });
-
-  // ChatGPT globals: data may already be there, or arrive via a globals event.
-  function fromOpenAI() {
-    var o = window.openai;
-    if (!o) return;
-    if (o.theme) document.documentElement.setAttribute("data-theme", o.theme);
-    if (o.toolOutput) render(o.toolOutput);
+  // ChatGPT globals: data may already be there, or arrive via a globals event
+  // (whose detail.globals carries the changed values).
+  function fromOpenAI(ev) {
+    var g = (ev && ev.detail && ev.detail.globals) || {};
+    var o = window.openai || {};
+    var theme = g.theme || o.theme;
+    if (theme) document.documentElement.setAttribute("data-theme", theme);
+    var out = g.toolOutput || o.toolOutput;
+    if (out) render(out);
   }
-  window.addEventListener("openai:set_globals", fromOpenAI);
-  fromOpenAI();
 
   // Talk back through the host: a follow-up message goes to the model, so a
   // card can ask for a menu or an add-to-cart without doing it behind its back.
@@ -97,7 +99,6 @@
   }).observe(document.body);
 
   // ---- rendering
-  var root = document.getElementById("root");
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
   function img(url, cls) {
     if (!url) return '<div class="img ph ' + (cls || "") + '">🛒</div>';
@@ -153,9 +154,39 @@
 
   function render(data) {
     if (!data || typeof data !== "object") return;
+    try { root.innerHTML = draw(data); root.className = ""; rendered = true; }
+    catch (e) {
+      // A drawing bug must not hide the result: fall back to the raw data.
+      root.className = "";
+      root.innerHTML = '<div class="note">Card error: ' + esc(e && e.message) + '</div><pre class="muted" style="white-space:pre-wrap">' + esc(JSON.stringify(data, null, 1)) + "</pre>";
+      rendered = true;
+    }
+  }
+  // One curated shortlist from the model (show_picks): the answer's own
+  // cards, with the photos the search results carried.
+  function pickCard(p) {
+    var add = p.itemId ? act(function () { say("Add " + p.name + " (item " + p.itemId + ")" + (p.venueName ? " from " + p.venueName : "") + " to my Wolt cart"); }) : null;
+    var openIt = p.url ? act(function () { open(p.url); }) : (p.venueSlug || p.venueName) ? act(function () { say("Show me the menu of " + (p.venueName || p.venueSlug) + (p.venueSlug ? " (venue " + p.venueSlug + ")" : "") + " on Wolt"); }) : null;
+    var price = p.priceText || (p.price != null ? money(p.price, p.currency) : "");
+    return '<div class="card">' + img(p.imageUrl) +
+      '<div class="body"><div class="name">' + esc(p.name) + "</div>" +
+      (p.venueName ? '<div class="sub">' + esc(p.venueName) + "</div>" : "") +
+      (p.description ? '<div class="sub" style="white-space:normal">' + esc(p.description) + "</div>" : "") +
+      '<div class="chips">' + (price ? '<span class="chip">' + esc(price) + "</span>" : "") + rating(p.rating) +
+      (p.eta ? '<span class="chip">' + esc(p.eta) + "</span>" : "") + "</div>" +
+      (add != null || openIt != null ? '<div class="actions">' + (add != null ? '<button class="primary" data-act="' + add + '">Add</button>' : "") +
+        (openIt != null ? '<button data-act="' + openIt + '">' + (p.url ? "Open in Wolt" : "Menu") + "</button>" : "") + "</div>" : "") + "</div></div>";
+  }
+  function draw(data) {
     actions = [];
     var html = "";
     switch (data.view) {
+      case "picks": {
+        var picks = data.items || [];
+        html = section(data.title || "", '<div class="grid">' + picks.map(pickCard).join("") + "</div>") +
+          (data.note ? '<div class="note">' + esc(data.note) + "</div>" : "");
+        break;
+      }
       case "products":
       case "dishes": {
         var items = data.items || data.dishes || [];
@@ -240,9 +271,21 @@
       default:
         html = '<pre class="muted" style="white-space:pre-wrap">' + esc(JSON.stringify(data, null, 1)) + "</pre>";
     }
-    root.className = "";
-    root.innerHTML = html;
+    return html;
   }
+
+  // ---- kick-off, after every declaration above exists: ChatGPT's data is
+  // already in window.openai when this runs, so the first render is now.
+  request("ui/initialize", { appInfo: { name: "wolt-mcp", version: "1" }, appCapabilities: {}, protocolVersion: PROTOCOL })
+    .then(function (res) { applyContext(res.hostContext || {}); notify("ui/notifications/initialized", {}); });
+  window.addEventListener("openai:set_globals", fromOpenAI);
+  fromOpenAI();
+  // Never leave a silent "Loading…": say what the host did and didn't send.
+  setTimeout(function () {
+    if (rendered) return;
+    var o = window.openai;
+    root.textContent = "No data from the host yet" + (o ? " (ChatGPT globals present, toolOutput " + (o.toolOutput ? "set" : "empty") + ")" : " (no ChatGPT globals; MCP Apps host did not send a tool result)") + ".";
+  }, 4000);
 })();
 </script>
 </body>

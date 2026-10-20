@@ -30,19 +30,36 @@ export function widgetHtml() {
 
 // The tools that render, with the status lines ChatGPT shows while and after
 // the call. Everything else stays text-only on purpose: a tool that changes
-// something should read as a sentence from the model, not as a card.
+// something should read as a sentence from the model, not as a card, and the
+// model's research steps (get_venue, get_venue_menu, called many times per
+// answer) would otherwise each leave a card behind; the answer's own cards
+// come from one show_picks call instead.
 export const RENDER_TOOLS = {
   search_products: ["Searching Wolt stores…", "Products found"],
   search_restaurant_dishes: ["Searching restaurants…", "Dishes found"],
   plan_cart: ["Planning the cart…", "Cart planned"],
-  get_venue_menu: ["Opening the menu…", "Menu loaded"],
-  get_venue: ["Looking up the venue…", "Venue details"],
   top_venues: ["Ranking venues nearby…", "Venues ranked"],
   search_venues: ["Searching venues…", "Venues found"],
   get_feed: ["Reading the feed…", "Feed loaded"],
   get_baskets: ["Reading your baskets…", "Baskets"],
-  checkout_preview: ["Pricing the basket…", "Checkout preview"]
+  checkout_preview: ["Pricing the basket…", "Checkout preview"],
+  show_picks: ["Laying out the picks…", "Picks"]
 };
+
+// show_picks takes URLs from the model, so only Wolt's own hosts get through:
+// a picture from anywhere else, or a link off wolt.com, is dropped.
+export function woltImageUrl(url) {
+  try {
+    const u = new URL(String(url));
+    return u.protocol === "https:" && (u.hostname === "imageproxy.wolt.com" || u.hostname === "wolt.com" || u.hostname.endsWith(".wolt.com")) ? u.href : null;
+  } catch { return null; }
+}
+export function woltLinkUrl(url) {
+  try {
+    const u = new URL(String(url));
+    return u.protocol === "https:" && (u.hostname === "wolt.com" || u.hostname.endsWith(".wolt.com")) ? u.href : null;
+  } catch { return null; }
+}
 
 // Appended to every render tool's description. Hosts that don't draw the
 // cards still have a model writing the answer, and a model with a picture
