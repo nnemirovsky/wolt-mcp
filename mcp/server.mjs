@@ -35,6 +35,7 @@ import { getVenue, getMenu, getItemOptions, getCategories, resolveItem, parseIte
 import { getOrderHistory, getOrder, geocodeAddress } from "./lib/account.js";
 import { langOf, sameScript, isNonLatinLang } from "./lib/lang.js";
 import { planAtVenue, planResponse, translationPreflight, rankPlans, mapPool } from "./lib/plan.js";
+import { rich, uiMeta, registerUi, imageUrlOf } from "./lib/ui.js";
 
 // catalogLanguage (+ a hint for non-Latin markets) for tool responses that
 // establish or report the user's location — so the model knows to translate
@@ -221,8 +222,11 @@ export function buildServer({ remote = false } = {}) {
   });
   for (const t of registry) {
     if (remote && LOCAL_ONLY_TOOLS.has(t.name)) continue;
-    server.registerTool(t.name, { description: t.description, inputSchema: t.schema, outputSchema: t.outputSchema, annotations: t.annotations, _meta: t._meta }, t.handler);
+    const meta = { ...(uiMeta(t.name) || {}), ...(t._meta || {}) };
+    server.registerTool(t.name, { description: t.description, inputSchema: t.schema, outputSchema: t.outputSchema, annotations: t.annotations, _meta: Object.keys(meta).length ? meta : undefined }, t.handler);
   }
+  // The inline-card template for hosts that render MCP Apps (lib/ui.js).
+  registerUi(server);
   return server;
 }
 
@@ -244,10 +248,10 @@ tool(
           getCatalogLanguage(venue_slug),
           searchVenueItems(venue_slug, query, { lang: langOf(query) })
         ]);
-        return text({
-          query, venue: { venueId: venue.venueId, slug: venue_slug, name: venue.name, currency: venue.currency, catalogLanguage },
+        return rich("products", {
+          query, venue: { venueId: venue.venueId, slug: venue_slug, name: venue.name, currency: venue.currency, catalogLanguage, imageUrl: venue.imageUrl ?? null },
           count: hits.length,
-          items: hits.slice(0, 15).map((c) => ({ itemId: c.itemId, name: c.name, price: c.price, ...(c.isWeighted ? { isWeighted: true, sellByWeight: c.sellByWeight } : {}) })),
+          items: hits.slice(0, 15).map((c) => ({ itemId: c.itemId, name: c.name, price: c.price, imageUrl: c.imageUrl ?? null, ...(c.isWeighted ? { isWeighted: true, sellByWeight: c.sellByWeight } : {}) })),
           ...(catalogLanguage && isNonLatinLang(catalogLanguage) && !sameScript(query, catalogLanguage)
             ? { languageNote: `This catalog is indexed in '${catalogLanguage}' and the query isn't — results may be poor or wrong-form. Translate the query to ${catalogLanguage} and retry for better matches.` }
             : {})
@@ -265,13 +269,13 @@ tool(
       // roughly half the payload.
       const venues = {};
       const top = items.slice(0, 20).map((c) => {
-        venues[c.venueId] ||= { name: c.venueName, slug: c.venueSlug, rating: c.venueRating, citySlug: c.citySlug, country: c.country };
+        venues[c.venueId] ||= { name: c.venueName, slug: c.venueSlug, rating: c.venueRating, citySlug: c.citySlug, country: c.country, ...(c.venueImage ? { imageUrl: c.venueImage } : {}) };
         return {
           itemId: c.itemId, name: c.name, price: c.price, currency: c.currency,
-          venueId: c.venueId, isWeighted: c.isWeighted, unitSize: c.unitSizeText
+          venueId: c.venueId, isWeighted: c.isWeighted, unitSize: c.unitSizeText, imageUrl: c.image || null
         };
       });
-      return text({ query, count: top.length, items: top, venues });
+      return rich("products", { query, count: top.length, items: top, venues });
     } catch (e) {
       return errText(`search failed: ${e.message}`);
     }
@@ -293,10 +297,10 @@ tool(
       const items = await searchItems(query, { lat, lon, lang: langOf(query), mode: "restaurant" });
       const venues = {};
       const top = items.slice(0, 20).map((c) => {
-        venues[c.venueId] ||= { name: c.venueName, slug: c.venueSlug, rating: c.venueRating, citySlug: c.citySlug, country: c.country };
-        return { itemId: c.itemId, name: c.name, price: c.price, currency: c.currency, venueId: c.venueId };
+        venues[c.venueId] ||= { name: c.venueName, slug: c.venueSlug, rating: c.venueRating, citySlug: c.citySlug, country: c.country, ...(c.venueImage ? { imageUrl: c.venueImage } : {}) };
+        return { itemId: c.itemId, name: c.name, price: c.price, currency: c.currency, venueId: c.venueId, imageUrl: c.image || null };
       });
-      return text({ query, count: top.length, dishes: top, venues });
+      return rich("dishes", { query, count: top.length, dishes: top, venues });
     } catch (e) {
       return errText(`restaurant search failed: ${e.message}`);
     }
@@ -358,7 +362,7 @@ tool(
         // Preflight: refuse to burn a whole planning round on off-script lines.
         const early = translationPreflight(ingredients, await getCatalogLanguage(venue_slug));
         if (early) return text(early);
-        return text(planResponse(await planAtVenue(venue_slug, ingredients), ingredients.length));
+        return rich("plan", planResponse(await planAtVenue(venue_slug, ingredients), ingredients.length));
       }
       ({ lat, lon } = await needLocation(lat, lon));
       const early = translationPreflight(ingredients, await getMarketLanguage({ lat, lon }));
@@ -384,7 +388,7 @@ tool(
           if (allDegraded) {
             return text({ rateLimited: true, note: "Wolt rate-limited the planning burst. Wait ~30 seconds and call plan_cart again, or pin one store with venue_slug." });
           }
-          return text({
+          return rich("plan", {
             ...planResponse(best, ingredients.length),
             evaluatedVenues: plans.map((p) => ({
               name: p.venue.name, slug: p.venue.slug, coverage: `${p.coverageCount}/${ingredients.length}`,
@@ -396,10 +400,10 @@ tool(
       const { venue, chosen, missing } = selectBestVenue(perIngredient);
       if (!venue) return text({ venue: null, missing, note: "No store covered these ingredients." });
       const currency = resolveCurrency({ candidates: chosen.map((c) => c.candidate), country: venue.country });
-      return text({
+      return rich("plan", {
         venue,
         coverage: `${chosen.length}/${ingredients.length}`,
-        lineItems: chosen.map((c) => ({ ingredient: c.ingredient, name: c.candidate.name, itemId: c.candidate.itemId, price: c.candidate.price, isWeighted: c.candidate.isWeighted })),
+        lineItems: chosen.map((c) => ({ ingredient: c.ingredient, name: c.candidate.name, itemId: c.candidate.itemId, price: c.candidate.price, isWeighted: c.candidate.isWeighted, imageUrl: c.candidate.image || null })),
         missing,
         basket: currency ? buildBasketBody(chosen.map((c) => ({ candidate: c.candidate, count: 1 })), venue.venueId, currency) : null,
         ...(currency ? {} : { basketNote: "No currency on record for this venue — call add_to_cart with an explicit currency taken from search_products results." })
@@ -539,9 +543,10 @@ tool(
         basketId: b.id,
         venueId: b.venue?.id,
         venueName: b.venue?.name,
-        items: (b.items || []).map((it) => ({ id: it.id, name: it.name, count: it.count, price: it.price }))
+        currency: b.currency || null,
+        items: (b.items || []).map((it) => ({ id: it.id, name: it.name, count: it.count, price: it.price, imageUrl: imageUrlOf(it.image) || it.image_url || null }))
       }));
-      return text({ count: baskets.length, baskets });
+      return rich("baskets", { count: baskets.length, baskets });
     } catch (e) {
       return errText(e.message);
     }
@@ -572,7 +577,7 @@ tool(
   async ({ venue_slug }) => {
     try {
       const [venue, catalogLanguage] = await Promise.all([getVenue(venue_slug), getCatalogLanguage(venue_slug)]);
-      return text({ ...venue, catalogLanguage });
+      return rich("venue", { ...venue, catalogLanguage });
     } catch (e) { return errText(e.message); }
   }
 );
@@ -588,7 +593,7 @@ tool(
     limit: z.number().int().default(30)
   },
   async ({ venue_slug, query, category, limit }) => {
-    try { return text(await getMenu(venue_slug, { query, categorySlug: category, limit })); } catch (e) { return errText(e.message); }
+    try { return rich("menu", { venueSlug: venue_slug, ...(await getMenu(venue_slug, { query, categorySlug: category, limit })) }); } catch (e) { return errText(e.message); }
   }
 );
 
@@ -680,19 +685,21 @@ tool(
   async ({ lat, lon, section }) => {
     try {
       ({ lat, lon } = await needLocation(lat, lon));
-      const r = await woltFetch(`https://consumer-api.wolt.com/v1/pages/front?lat=${lat}&lon=${lon}`);
+      const r = await woltFetch(`https://consumer-api.wolt.com/v1/pages/front?lat=${lat}&lon=${lon}`, { auth: "optional" });
       if (!r.ok) return errText(`feed failed: HTTP ${r.status}`);
       let sections = (r.json?.sections || []).map((s) => ({
         title: s.title || s.name || null,
         venues: (s.items || []).filter((it) => it.venue).slice(0, 10).map((it) => ({
           name: it.venue.name, slug: it.venue.slug, venueId: it.venue.id,
           rating: it.venue.rating?.score ?? it.venue.rating?.rating ?? null,
+          ratingVolume: it.venue.rating?.volume ?? null,
+          imageUrl: it.venue.image_url || imageUrlOf(it.image) || null,
           estimate: it.venue.estimate_range || it.venue.delivery_price || null,
           online: it.venue.online ?? null
         }))
       })).filter((s) => s.title && s.venues.length);
       if (section) sections = sections.filter((s) => s.title.toLowerCase().includes(section.toLowerCase()));
-      return text({ sections });
+      return rich("venues", { sections });
     } catch (e) { return errText(e.message); }
   }
 );
@@ -715,7 +722,7 @@ tool(
   async ({ lat, lon, open_now, min_score, max_delivery_fee, wolt_plus_only, kind, query, sort, limit }) => {
     try {
       ({ lat, lon } = await needLocation(lat, lon));
-      const r = await woltFetch(`https://consumer-api.wolt.com/v1/pages/front?lat=${lat}&lon=${lon}`);
+      const r = await woltFetch(`https://consumer-api.wolt.com/v1/pages/front?lat=${lat}&lon=${lon}`, { auth: "optional" });
       if (!r.ok) return errText(`feed failed: HTTP ${r.status}`);
       const seen = new Set();
       let venues = [];
@@ -727,6 +734,7 @@ tool(
           venues.push({
             name: v.name, slug: v.slug, venueId: v.id,
             score: v.rating?.score ?? null, ratingVolume: v.rating?.volume ?? null,
+            imageUrl: v.image_url || imageUrlOf(it.image) || null, currency: v.currency || null,
             online: v.online ?? null, estimateMinutes: v.estimate ?? null,
             deliveryFee: v.delivery_price_int ?? null, deliveryFeeFormatted: v.delivery_price ?? null,
             woltPlus: !!v.show_wolt_plus, productLine: v.product_line || null,
@@ -749,7 +757,7 @@ tool(
         : sort === "estimate" ? (a.estimateMinutes ?? 1e9) - (b.estimateMinutes ?? 1e9)
         : (b.score ?? -1) - (a.score ?? -1)
       );
-      return text({ totalNearby: total, matching: venues.length, venues: venues.slice(0, limit) });
+      return rich("venues", { totalNearby: total, matching: venues.length, venues: venues.slice(0, limit) });
     } catch (e) { return errText(e.message); }
   }
 );
@@ -763,7 +771,7 @@ tool(
     try {
       ({ lat, lon } = await needLocation(lat, lon));
       const r = await woltFetch("https://restaurant-api.wolt.com/v1/pages/search", {
-        method: "POST", body: { q: query, target: null, lat, lon }
+        method: "POST", body: { q: query, target: null, lat, lon }, auth: "optional"
       });
       if (!r.ok) return errText(`venue search failed: HTTP ${r.status}`);
       const venues = [];
@@ -774,12 +782,14 @@ tool(
           venues.push({
             name: v.name, slug: v.slug, venueId: v.id,
             rating: v.rating?.score ?? v.rating?.rating ?? null,
+            ratingVolume: v.rating?.volume ?? null,
+            imageUrl: v.image_url || imageUrlOf(it.image) || null,
             online: v.online ?? null, address: v.address || null,
             productLine: v.product_line || null
           });
         }
       }
-      return text({ query, count: venues.length, venues: venues.slice(0, 15) });
+      return rich("venues", { query, count: venues.length, venues: venues.slice(0, 15) });
     } catch (e) { return errText(e.message); }
   }
 );
@@ -859,7 +869,7 @@ tool(
         lat, lon, tip, promoCode: promo_code || null
       });
       const { raw, ...summary } = preview; // keep the tool result compact
-      return text(summary);
+      return rich("checkout", summary);
     } catch (e) {
       return errText(e.message);
     }
