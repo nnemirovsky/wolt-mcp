@@ -101,9 +101,26 @@ export function registerUi(server) {
 // A render tool's result: the JSON the model has always read, plus the same
 // object as structuredContent tagged with the view the iframe should draw.
 export function rich(view, obj) {
+  const tagged = { view, ...obj };
   return {
-    content: [{ type: "text", text: JSON.stringify(obj, null, 2) }],
-    structuredContent: { view, ...obj }
+    // The same object in both places: a host that hands the iframe only the
+    // text block (seen in ChatGPT) still lets it find the view.
+    content: [{ type: "text", text: JSON.stringify(tagged, null, 2) }],
+    structuredContent: tagged
+  };
+}
+
+// Stamped on a render tool's result: the template again plus the status
+// lines, the way ChatGPT's own examples do it, so a host that reads the
+// result rather than the descriptor still finds the card.
+export function resultMeta(toolName) {
+  const status = RENDER_TOOLS[toolName];
+  if (!status) return undefined;
+  return {
+    ui: { resourceUri: UI_RESOURCE_URI },
+    "openai/outputTemplate": UI_RESOURCE_URI,
+    "openai/toolInvocation/invoking": status[0],
+    "openai/toolInvocation/invoked": status[1]
   };
 }
 
