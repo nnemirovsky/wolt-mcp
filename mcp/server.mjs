@@ -207,7 +207,7 @@ function tool(name, description, schemaOrHandler, maybeHandler) {
 
 const INSTRUCTIONS = (remote) => "When the user wants to BUY something (not just browse), call wolt_status FIRST — it live-verifies the Wolt login. If it reports loginNeeded, sort the login out with the user (" +
   (remote
-    ? "this server runs remotely, so there is no browser login here: the user runs `npx -y wolt-mcp login` on their own computer, which prints a refresh token, and pastes it to set_wolt_token"
+    ? "this server runs remotely, so there is no browser login here: the user logs in at wolt.com, opens developer tools → Network, finds the request to authentication.wolt.com/v1/wauth2/access_token, copies its refresh_token, and pastes it to set_wolt_token"
     : "login_via_chrome, or set_wolt_token on Firefox/Safari") +
   ") before searching and planning, so the work isn't lost to an expired session mid-checkout. Searching and browsing venues never need a login.";
 
