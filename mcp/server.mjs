@@ -195,14 +195,18 @@ export const TOOL_ANNOTATIONS = {
 const LOCAL_ONLY_TOOLS = new Set(["login_via_chrome"]);
 
 const registry = [];
-// tool(name, description, [schema], handler) — the shape the registrations
-// below have always used; the schema is optional for argument-less tools.
-function tool(name, description, schemaOrHandler, maybeHandler) {
-  const handler = maybeHandler || schemaOrHandler;
-  const schema = maybeHandler ? schemaOrHandler : undefined;
+// tool(name, description, [schema], handler, [extra]) — the shape the
+// registrations below have always used; the schema is optional for
+// argument-less tools, and extra carries outputSchema / _meta when a tool
+// has them.
+function tool(name, description, schemaOrHandler, maybeHandler, maybeExtra) {
+  const hasSchema = typeof schemaOrHandler !== "function";
+  const handler = hasSchema ? maybeHandler : schemaOrHandler;
+  const schema = hasSchema ? schemaOrHandler : undefined;
+  const extra = (hasSchema ? maybeExtra : maybeHandler) || {};
   const annotations = TOOL_ANNOTATIONS[name];
   if (!annotations) throw new Error(`tool ${name} has no entry in TOOL_ANNOTATIONS`);
-  registry.push({ name, description, schema, annotations, handler });
+  registry.push({ name, description, schema, annotations, handler, ...extra });
 }
 
 const INSTRUCTIONS = (remote) => "When the user wants to BUY something (not just browse), call wolt_status FIRST — it live-verifies the Wolt login. If it reports loginNeeded, sort the login out with the user (" +
@@ -217,7 +221,7 @@ export function buildServer({ remote = false } = {}) {
   });
   for (const t of registry) {
     if (remote && LOCAL_ONLY_TOOLS.has(t.name)) continue;
-    server.registerTool(t.name, { description: t.description, inputSchema: t.schema, annotations: t.annotations }, t.handler);
+    server.registerTool(t.name, { description: t.description, inputSchema: t.schema, outputSchema: t.outputSchema, annotations: t.annotations, _meta: t._meta }, t.handler);
   }
   return server;
 }
@@ -943,20 +947,59 @@ tool(
   }
 );
 
-// --- get_wolt_profile: authenticated user info (may include saved addresses) ---
+// --- get_wolt_profile: who the connected Wolt account is ---
+//
+// Doubles as the connection's identity for clients that label linked
+// accounts: ChatGPT looks for a tool marked _meta["openai/profile"] and calls
+// it with the connection's credentials, expecting {id, name?, email?,
+// nickname?} and nothing else, with a stable id. So the shape is exactly that,
+// in structuredContent and as JSON text. A profile without an id is an error,
+// never a made-up one — an invented id would make ChatGPT merge or split
+// accounts wrongly.
 tool(
   "get_wolt_profile",
-  "Fetch the logged-in user's Wolt profile — name/email/phone only (GET /v1/user/me; needs a token). It does NOT contain delivery addresses: to pull the user's saved addresses and set one as the search location, call use_saved_address instead.",
+  "Who the connected Wolt account is: id, name and email (GET /v1/user/me; needs a token). It does NOT contain delivery addresses: to pull the user's saved addresses and set one as the search location, call use_saved_address instead.",
   async () => {
     try {
       const r = await woltFetch("https://restaurant-api.wolt.com/v1/user/me");
       if (!r.ok) return errText(`profile fetch failed: HTTP ${r.status} ${r.text.slice(0, 200)}`);
-      return text(r.json ?? r.text);
+      const profile = woltProfile(r.json);
+      if (!profile) return errText("Wolt returned a profile without a stable user id — nothing to report.");
+      return { content: [{ type: "text", text: JSON.stringify(profile) }], structuredContent: profile };
     } catch (e) {
       return errText(e.message);
     }
+  },
+  {
+    outputSchema: {
+      id: z.string().min(1).regex(/\S/).describe("Wolt user id — stable for the account"),
+      name: z.string().optional(),
+      email: z.string().optional(),
+      nickname: z.string().optional().describe("First name, to tell connected accounts apart")
+    },
+    _meta: { "openai/profile": true }
   }
 );
+
+// Wolt's /v1/user/me wraps the record in `user`; names come as
+// {first_name, last_name} or as a plain string depending on the account's
+// age. Only the identity fields are kept — see the tool's comment.
+export function woltProfile(json) {
+  const u = json?.user || json || {};
+  const id = u.id || u._id || u.user_id;
+  if (typeof id !== "string" || !id.trim()) return null;
+  const n = u.name;
+  const first = typeof n === "object" && n ? n.first_name : u.first_name;
+  const last = typeof n === "object" && n ? n.last_name : u.last_name;
+  const name = typeof n === "string" ? n : [first, last].filter(Boolean).join(" ");
+  const email = typeof u.email === "string" ? u.email : undefined;
+  return {
+    id,
+    ...(name ? { name } : {}),
+    ...(email ? { email } : {}),
+    ...(first ? { nickname: first } : {})
+  };
+}
 
 // --- set_location: persist the delivery location ---
 tool(

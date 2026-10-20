@@ -17,7 +17,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 // test must never read or write the real ~/.wolt-mcp.
 const stateDir = mkdtempSync(join(tmpdir(), "wolt-remote-"));
 process.env.WOLT_STATE_DIR = stateDir;
-const { buildServer, VERSION, TOOL_ANNOTATIONS } = await import("../server.mjs");
+const { buildServer, VERSION, TOOL_ANNOTATIONS, woltProfile } = await import("../server.mjs");
+
+// The identity shape from Wolt's user record, old and new name formats.
+assert.deepEqual(woltProfile({ user: { id: "u1", name: { first_name: "Nikita", last_name: "N" }, email: "n@example.com", phone_number: "+1" } }), { id: "u1", name: "Nikita N", email: "n@example.com", nickname: "Nikita" });
+assert.deepEqual(woltProfile({ user: { _id: "u2", name: "Plain Name" } }), { id: "u2", name: "Plain Name" });
+assert.equal(woltProfile({ user: { name: "no id" } }), null, "no id → no profile, never an invented one");
 const { serveHttp, remoteConfig, parseHttpArgs } = await import("../lib/remote.js");
 const { verifyAccessJwt, isAcceptableRedirectUri } = await import("../lib/oauth.js");
 
@@ -190,6 +195,13 @@ try {
   assert.equal(tools.find((t) => t.name === "search_products").annotations.readOnlyHint, true);
   assert.equal(tools.find((t) => t.name === "add_to_cart").annotations.readOnlyHint, false);
   assert.equal(tools.find((t) => t.name === "clear_basket").annotations.destructiveHint, true);
+  // ChatGPT labels the linked account from the tool marked as the profile
+  // source; it must advertise the exact {id, name, email, nickname} shape.
+  const profileTool = tools.find((t) => t.name === "get_wolt_profile");
+  assert.equal(profileTool._meta?.["openai/profile"], true, "get_wolt_profile is the profile source");
+  assert.deepEqual(Object.keys(profileTool.outputSchema.properties).sort(), ["email", "id", "name", "nickname"]);
+  assert.deepEqual(profileTool.outputSchema.required, ["id"]);
+  assert.equal(profileTool.outputSchema.additionalProperties, false);
   assert.match(client.getInstructions(), /wauth2\/access_token/, "remote instructions explain where the refresh token comes from");
   assert.equal(client.getServerVersion()?.version, VERSION);
   await client.close();
