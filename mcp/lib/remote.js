@@ -19,14 +19,15 @@
 //   OAUTH_REDIRECT_URIS         the static client's redirect URIs, comma-separated
 //   API_TOKENS                  optional comma list of long-lived bearer tokens for
 //                               clients that can only send a fixed header (a desktop
-//                               agent's "bearer token" field, an iOS Shortcut)
+//                               agent's "bearer token" field, an iOS Shortcut); each
+//                               gets its own account slot, connected via set_wolt_token
 import { createServer } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { OAuthProvider, OAuthError, newAccountId } from "./oauth.js";
-import { setRemoteMode, validateRefreshToken, adoptTokens, describeTokens } from "./auth.js";
+import { setRemoteMode, validateRefreshToken, adoptTokens } from "./auth.js";
 import { withStateDir, accountStateDir } from "./context.js";
 
 const DEFAULT_STATIC_REDIRECTS = [
@@ -146,12 +147,14 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
       res.setHeader("Allow", "POST, OPTIONS");
       return sendJson(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed: this server is stateless, use POST" }, id: null });
     }
-    let grant = null; // the OAuth token record; API tokens use the server's own account
+    let grant = null; // the OAuth token record; null for a fixed API token
+    let presentedToken = null;
     if (provider || cfg.apiTokens.length) {
       const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
       const presented = m ? m[1].trim() : null;
       if (presented && !isApiToken(presented) && provider) grant = provider.verifyBearer(presented);
       const ok = presented && (isApiToken(presented) || grant);
+      presentedToken = presented;
       if (!ok) {
         if (!provider) {
           res.setHeader("WWW-Authenticate", 'Bearer realm="wolt-mcp"');
@@ -163,9 +166,23 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
       }
     }
     // Everything the tools read or write (Wolt tokens, saved location) is
-    // resolved against this grant's account directory for the whole request.
+    // resolved against the caller's own account directory for the whole
+    // request. There is no shared account: a grant approved without a Wolt
+    // token (an older one) is sent back through authorization, and a fixed
+    // API token gets a slot of its own, connected via set_wolt_token in chat.
     let stateDir;
-    try { stateDir = accountStateDir(cfg.stateDir, grant?.accountId); } catch (e) { return sendJson(res, 401, { error: "invalid_token", error_description: "token refers to an unknown account" }); }
+    try {
+      // WOLT_HTTP_AUTH=none is a single-user private deployment: it keeps the
+      // state dir root, like stdio does.
+      const accountId = grant ? grant.accountId
+        : presentedToken ? `api-${createHash("sha256").update(presentedToken).digest("base64url").slice(0, 16)}`
+        : null;
+      if (!accountId && (provider || cfg.apiTokens.length)) {
+        res.setHeader("WWW-Authenticate", `Bearer error="invalid_token", error_description="this authorization has no Wolt account; authorize again", resource_metadata="${cfg.publicUrl}/.well-known/oauth-protected-resource"`);
+        return sendJson(res, 401, { error: "invalid_token", error_description: "This authorization has no Wolt account attached. Authorize again and paste a Wolt refresh token." });
+      }
+      stateDir = accountId ? accountStateDir(cfg.stateDir, accountId) : cfg.stateDir;
+    } catch (e) { return sendJson(res, 401, { error: "invalid_token", error_description: "token refers to an unknown account" }); }
     await withStateDir(stateDir, async () => {
       const mcpServer = buildServer({ remote: true });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -215,22 +232,21 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     // GET with the secret guard: the form is the question.
     if (req.method === "GET" || !verdict.ok || !body.approve) return consentPage(res, request, q, null);
 
-    // An optional Wolt refresh token gives this grant its own account slot.
-    // It is exchanged once right here, so a bad paste is caught on the page
-    // rather than at the first tool call, and the rotation is stored too.
-    let accountId = null;
+    // Every grant brings its own Wolt account — the server has none to lend.
+    // The pasted refresh token is exchanged once right here, so a bad paste is
+    // caught on the page rather than at the first tool call, and the rotation
+    // Wolt hands back is stored alongside it.
     const pasted = String(body.wolt_token || "").trim();
-    if (pasted) {
-      let validated;
-      try {
-        validated = await validateRefreshToken(pasted);
-      } catch (e) {
-        recordFailure(ip);
-        return consentPage(res, request, q, `Wolt did not accept that refresh token (${e.message}). Get a fresh one with npx -y wolt-mcp login and try again.`);
-      }
-      accountId = newAccountId();
-      withStateDir(accountStateDir(cfg.stateDir, accountId), () => adoptTokens(validated));
+    if (!pasted) return consentPage(res, request, q, "A Wolt refresh token is required: this connection gets its own Wolt account.");
+    let validated;
+    try {
+      validated = await validateRefreshToken(pasted);
+    } catch (e) {
+      recordFailure(ip);
+      return consentPage(res, request, q, `Wolt did not accept that refresh token (${e.message}). Get a fresh one with npx -y wolt-mcp login and try again.`);
     }
+    const accountId = newAccountId();
+    withStateDir(accountStateDir(cfg.stateDir, accountId), () => adoptTokens(validated));
     return redirect(res, provider.issueCode({ ...request, who: verdict.who, accountId }));
   }
 
@@ -258,19 +274,14 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     const field = `<input type="hidden" name="approve" value="1">` + (cfg.guard.type === "secret"
       ? `<label>Approve secret<br><input type="password" name="secret" autocomplete="current-password" autofocus required></label>`
       : "");
-    // Which Wolt account the connection will use. If the server has none
-    // connected yet the paste field is the main event; otherwise it is folded
-    // away behind "use a different account".
-    const serverHasAccount = withStateDir(cfg.stateDir, () => describeTokens().refreshTokenStored);
-    const tokenInput = `<label>Wolt refresh token<br><input type="password" name="wolt_token" autocomplete="off" spellcheck="false"></label>` +
-      `<p class="muted">Run <code>npx -y wolt-mcp login</code> on your computer; it opens the Wolt login in a browser and prints the token. The token is exchanged once now and renews itself afterwards.</p>`;
-    const account = serverHasAccount
-      ? `<details><summary>Use a different Wolt account for this connection</summary><p class="muted">Leave empty to use the Wolt account already connected to this server.</p>${tokenInput}</details>`
-      : `<p><b>This server has no Wolt account connected yet.</b> Paste a refresh token to connect one for this connection (searching works without it; baskets and orders don't).</p>${tokenInput}`;
+    // The connection's own Wolt account. The server holds none to share, so
+    // the token is required — the page is the whole account setup.
+    const account = `<label>Your Wolt refresh token<br><input type="password" name="wolt_token" autocomplete="off" spellcheck="false" required></label>` +
+      `<p class="muted">Run <code>npx -y wolt-mcp login</code> on your computer; it opens the Wolt login in a browser and prints the token. It is exchanged once now and renews itself afterwards; this connection uses only the account it belongs to.</p>`;
     // form-action also governs where a form POST may be *redirected*, so the
     // client's callback origin has to be allowed or the browser drops the code.
     return page(res, error ? 403 : 200, "Allow access to your Wolt account?",
-      `<p><b>${esc(request.client.name)}</b> <span class="muted">(${esc(host)})</span> wants to use this wolt-mcp server: search, your baskets, order history and favourites on the connected Wolt account.</p>` +
+      `<p><b>${esc(request.client.name)}</b> <span class="muted">(${esc(host)})</span> wants to use this wolt-mcp server: search, your baskets, order history and favourites on the Wolt account you connect here.</p>` +
       (error ? `<p class="err">${esc(error)}</p>` : "") +
       `<form method="post" action="/authorize">${hidden}${field}${account}<p><button type="submit">Allow</button></p></form>`,
       { formAction: new URL(request.redirectUri).origin });
@@ -328,7 +339,7 @@ function page(res, status, title, bodyHtml, { formAction } = {}) {
   const csp = `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formAction ? ` ${formAction}` : ""}; frame-ancestors 'none'`;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": csp });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — wolt-mcp</title>` +
-    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}details{margin:1rem 0}summary{cursor:pointer}code{font-size:.9em}</style></head>` +
+    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}code{font-size:.9em}</style></head>` +
     `<body><h1>${esc(title)}</h1>${bodyHtml}<p class="muted">wolt-mcp</p></body></html>`);
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

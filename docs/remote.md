@@ -14,11 +14,11 @@ What changes compared to stdio:
 - **Location is per account, never guessed.** Locally the first search falls back to a city-level guess from your IP. A server's IP says where the server is, so remotely there is no guess: each account starts with no location and the model asks, or pulls it with `use_saved_address`.
 - **One consumer per Wolt refresh chain.** Wolt's refresh tokens rotate, and two processes refreshing from the same chain eventually trip over each other. Once the remote server works, point your desktop clients at the URL too instead of running stdio copies alongside it; different accounts, or separate logins of the same account, are independent chains and coexist fine.
 
-## Wolt accounts per connection
+## One Wolt account per connection
 
-Every OAuth grant can carry its own Wolt account. The approve page has a **Wolt refresh token** field: paste one and the token is exchanged once right there (a bad paste fails on the page, not at the first tool call), the grant gets a private slot under `<state dir>/accounts/<id>/` with its own `tokens.json` and `config.json`, and every tool call made with that grant — including its refreshes — reads and writes only that slot. Leave the field empty and the grant uses the server's own account, the one the operator connected in the state directory root. When the server has no account of its own yet, the field is shown open; otherwise it is folded behind "Use a different Wolt account for this connection".
+The server holds no Wolt account of its own: it is a public endpoint, and every connection brings its own. The approve page requires a **Wolt refresh token**. It is exchanged once right there (a bad paste fails on the page, not at the first tool call), the grant gets a private slot under `<state dir>/accounts/<id>/` with its own `tokens.json` and `config.json`, and every tool call made with that grant — including its refreshes — reads and writes only that slot. An authorization that somehow has no account is answered with 401 so the client re-authorizes.
 
-So one server can serve several people in several countries, each with their own Wolt login, address and currency, as long as each of them can pass the approve-page guard. Fixed `WOLT_API_TOKENS` bearers always use the server's own account.
+So one server can serve several people in several countries, each with their own Wolt login, address and currency, as long as each of them can pass the approve-page guard. A fixed `WOLT_API_TOKENS` bearer gets a slot of its own too, connected by calling `set_wolt_token` through it. Only `WOLT_HTTP_AUTH=none`, the single-user private mode, keeps using the state directory root like stdio does.
 
 ## Configuration
 
@@ -59,7 +59,7 @@ Tool annotations are set so clients know what each tool does before calling it: 
    cp .env.example .env   # fill in WOLT_PUBLIC_URL, the Access team + AUD, the tunnel token
    docker compose up -d --build
    ```
-4. Connect a Wolt account: run `npx -y wolt-mcp login` on your computer and paste the printed refresh token on the approve page when you connect your first client (that gives the grant its own account), or copy `~/.wolt-mcp/tokens.json` into the `wolt-data` volume to give the server a default account that grants without a paste share.
+4. Connect a client: run `npx -y wolt-mcp login` on your computer and paste the printed refresh token on the approve page. Each client connection gets its own Wolt account that way; the server never holds one of its own.
 
 Check it: `curl -i https://wolt.example.com/mcp -X POST` should return 401 with a `WWW-Authenticate` header, and an anonymous `curl -i https://wolt.example.com/authorize` should redirect to your `cloudflareaccess.com` login.
 

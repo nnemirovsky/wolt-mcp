@@ -5,7 +5,7 @@
 // server runs in-process on a loopback port with a throwaway state dir.
 import assert from "node:assert";
 import { createServer } from "node:net";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes, generateKeyPairSync, sign } from "node:crypto";
@@ -49,6 +49,7 @@ const port = await freePort();
 const publicUrl = `http://127.0.0.1:${port}`;
 const SECRET = ["correct", "horse", "battery", "staple"].join("-"); // the approve-page secret for this test
 const API_TOKEN = b64url(randomBytes(32));
+const realFetch = globalThis.fetch;
 const srv = await serveHttp({
   buildServer, version: VERSION, port, host: "127.0.0.1", log: noLog,
   env: { WOLT_STATE_DIR: stateDir, WOLT_PUBLIC_URL: publicUrl, WOLT_OAUTH_APPROVE_SECRET: SECRET, WOLT_API_TOKENS: API_TOKEN,
@@ -119,23 +120,38 @@ try {
   assert.equal(r.status, 302);
   assert.match(r.headers.get("location"), /error=invalid_request/);
   assert.match(r.headers.get("location"), /state=xyz/);
+  // Every approval carries a Wolt refresh token (the server has no account of
+  // its own). Wolt's token endpoint is stubbed: it rotates the refresh token
+  // and returns an access JWT valid for an hour.
+  const fakeJwt = `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))}.sig`;
+  const woltCalls = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://authentication.wolt.com/")) {
+      const refresh = new URLSearchParams(String(init.body)).get("refresh_token");
+      woltCalls.push(refresh);
+      if (refresh === "pasted-refresh-token") return new Response(JSON.stringify({ access_token: fakeJwt, refresh_token: "rotated-by-wolt" }), { status: 200 });
+      return new Response("invalid_grant", { status: 401 });
+    }
+    return realFetch(url, init);
+  };
+  const approval = { ...authz, approve: "1", secret: SECRET, wolt_token: "pasted-refresh-token" };
   // Wrong secret: back to the form with an error, no code.
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: "wrong" }, { headers: { origin: publicUrl } });
+  r = await postForm("/authorize", { ...approval, secret: "wrong" }, { headers: { origin: publicUrl } });
   assert.equal(r.status, 403);
   assert.match(await r.text(), /wrong/);
   // Cross-site post: blocked even with the right secret, whichever signal says so.
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: "https://evil.example" } });
+  r = await postForm("/authorize", approval, { headers: { origin: "https://evil.example" } });
   assert.equal(r.status, 403);
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl, "sec-fetch-site": "cross-site" } });
+  r = await postForm("/authorize", approval, { headers: { origin: publicUrl, "sec-fetch-site": "cross-site" } });
   assert.equal(r.status, 403, "Sec-Fetch-Site wins over a spoofable Origin");
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: "null", "sec-fetch-site": "none" } });
+  r = await postForm("/authorize", approval, { headers: { origin: "null", "sec-fetch-site": "none" } });
   assert.equal(r.status, 403, "a direct navigation is not an approval");
   // What a real browser sends: Origin may be "null" under a strict referrer
   // policy, Sec-Fetch-Site says same-origin — that must pass.
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: "null", "sec-fetch-site": "same-origin" } });
+  r = await postForm("/authorize", approval, { headers: { origin: "null", "sec-fetch-site": "same-origin" } });
   assert.equal(r.status, 302, "browser-shaped same-origin post is accepted");
   // The real thing.
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl } });
+  r = await postForm("/authorize", approval, { headers: { origin: publicUrl } });
   assert.equal(r.status, 302, "right secret → redirect with code");
   const loc = new URL(r.headers.get("location"));
   assert.equal(loc.origin + loc.pathname, redirectUri);
@@ -150,7 +166,7 @@ try {
   r = await postForm("/token", { grant_type: "authorization_code", code, redirect_uri: redirectUri, client_id: reg.client_id, code_verifier: verifier });
   assert.equal(r.status, 400, "a code is single use even after a failed attempt");
 
-  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl } });
+  r = await postForm("/authorize", approval, { headers: { origin: publicUrl } });
   const code2 = new URL(r.headers.get("location")).searchParams.get("code");
   r = await postForm("/token", { grant_type: "authorization_code", code: code2, redirect_uri: redirectUri, client_id: reg.client_id, code_verifier: verifier });
   assert.equal(r.status, 200, `token exchange: ${await r.clone().text()}`);
@@ -211,37 +227,26 @@ try {
     await c.close();
     return JSON.parse(out.content[0].text);
   };
-  // The grant approved above pasted nothing: it uses the server's own account,
-  // which in this scratch state dir is not connected — and remotely the IP is
-  // never used as a location guess.
-  let st = await statusVia(rotated.access_token);
+  // A fixed API token has a slot of its own, not connected until set_wolt_token;
+  // remotely the IP is never used as a location guess either.
+  let st = await statusVia(API_TOKEN);
   assert.equal(st.loginNeeded, true);
   assert.match(st.loginDetail, /npx -y wolt-mcp login/, "remote setup message names the local login helper");
-  assert.equal(st.stateFile, join(stateDir, "tokens.json"), "default slot is the server's state dir");
+  assert.match(st.stateFile, /\/accounts\/api-[A-Za-z0-9_-]{16}\/tokens\.json$/, "API tokens get their own slot");
   assert.equal(st.location.label, "not set (estimated from IP on first search)");
-  // The approve page says the server has no account yet (the paste field is open).
+  assert(!existsSync(join(stateDir, "tokens.json")), "the state dir root never holds an account");
+  // The approve page requires a Wolt token; an approval without one is refused.
   r = await get(`/authorize?${new URLSearchParams(authz)}`);
-  assert.match(await r.text(), /no Wolt account connected yet/);
+  assert.match(await r.text(), /name="wolt_token"[^>]*required/);
+  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl } });
+  assert.equal(r.status, 403, "no Wolt token, no grant");
+  assert.match(await r.text(), /refresh token is required/);
 
-  // Approve with a pasted refresh token. Wolt's token endpoint is stubbed:
-  // it rotates the refresh token and returns an access JWT valid for an hour.
-  const fakeJwt = `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))}.sig`;
-  const realFetch = globalThis.fetch;
-  let woltCalls = [];
-  globalThis.fetch = async (url, init) => {
-    if (String(url).startsWith("https://authentication.wolt.com/")) {
-      const refresh = new URLSearchParams(String(init.body)).get("refresh_token");
-      woltCalls.push(refresh);
-      if (refresh === "pasted-refresh-token") return new Response(JSON.stringify({ access_token: fakeJwt, refresh_token: "rotated-by-wolt" }), { status: 200 });
-      return new Response("invalid_grant", { status: 401 });
-    }
-    return realFetch(url, init);
-  };
-  try {
+  {
     r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET, wolt_token: "%22bad-token%22" }, { headers: { origin: publicUrl } });
     assert.equal(r.status, 403, "a refresh token Wolt rejects is caught on the page");
     assert.match(await r.text(), /did not accept that refresh token/);
-    assert.deepEqual(woltCalls, ["bad-token"], "cookie wrapping is peeled before the exchange");
+    assert.equal(woltCalls.at(-1), "bad-token", "cookie wrapping is peeled before the exchange");
 
     r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET, wolt_token: "pasted-refresh-token" }, { headers: { origin: publicUrl } });
     assert.equal(r.status, 302, "a working refresh token is accepted");
@@ -258,22 +263,17 @@ try {
     assert.equal(slot.refreshToken, "pasted-refresh-token", "the paste stays pinned as bootstrap");
     assert.equal(slot.rotatedRefreshToken, "rotated-by-wolt", "the rotation from validation is kept");
     assert.equal(st.location.label, "not set (estimated from IP on first search)", "a new account has no location until it sets one");
-    // Still unaffected: the default slot.
-    st = await statusVia(rotated.access_token);
+    // Unaffected: the API token's slot.
+    st = await statusVia(API_TOKEN);
     assert.equal(st.loginNeeded, true);
     // The account survives a refresh of the OAuth grant.
     r = await postForm("/token", { grant_type: "refresh_token", refresh_token: own.refresh_token, client_id: reg.client_id });
     assert.equal(r.status, 200);
     st = await statusVia((await r.json()).access_token);
     assert.equal(st.loginNeeded, false, "refreshed grant keeps its account");
-    // Now that an account exists in the default slot? No — it is per-slot, so the
-    // approve page still offers the paste field open for the server account.
-    r = await get(`/authorize?${new URLSearchParams(authz)}`);
-    assert.match(await r.text(), /no Wolt account connected yet/);
-  } finally {
-    globalThis.fetch = realFetch;
   }
 } finally {
+  globalThis.fetch = realFetch;
   await srv.close();
 }
 
