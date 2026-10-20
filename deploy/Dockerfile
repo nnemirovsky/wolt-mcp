@@ -9,6 +9,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY mcp/server.mjs ./
 COPY mcp/lib ./lib
+COPY mcp/ui ./ui
 
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
