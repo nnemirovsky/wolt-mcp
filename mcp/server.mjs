@@ -35,7 +35,7 @@ import { getVenue, getMenu, getItemOptions, getCategories, resolveItem, parseIte
 import { getOrderHistory, getOrder, geocodeAddress } from "./lib/account.js";
 import { langOf, sameScript, isNonLatinLang } from "./lib/lang.js";
 import { planAtVenue, planResponse, translationPreflight, rankPlans, mapPool } from "./lib/plan.js";
-import { rich, uiMeta, describe, registerUi, imageUrlOf, woltImageUrl, woltLinkUrl } from "./lib/ui.js";
+import { rich, uiMeta, resultMeta, describe, registerUi, imageUrlOf, woltImageUrl, woltLinkUrl } from "./lib/ui.js";
 
 // catalogLanguage (+ a hint for non-Latin markets) for tool responses that
 // establish or report the user's location — so the model knows to translate
@@ -223,7 +223,13 @@ export function buildServer({ remote = false } = {}) {
   for (const t of registry) {
     if (remote && LOCAL_ONLY_TOOLS.has(t.name)) continue;
     const meta = { ...(uiMeta(t.name) || {}), ...(t._meta || {}) };
-    server.registerTool(t.name, { description: describe(t.name, t.description), inputSchema: t.schema, outputSchema: t.outputSchema, annotations: t.annotations, _meta: Object.keys(meta).length ? meta : undefined }, t.handler);
+    const stamp = resultMeta(t.name);
+    // A render tool's result carries the card metadata too (see resultMeta).
+    const handler = stamp ? async (...args) => {
+      const r = await t.handler(...args);
+      return r && r.structuredContent && !r.isError ? { ...r, _meta: { ...stamp, ...(r._meta || {}) } } : r;
+    } : t.handler;
+    server.registerTool(t.name, { description: describe(t.name, t.description), inputSchema: t.schema, outputSchema: t.outputSchema, annotations: t.annotations, _meta: Object.keys(meta).length ? meta : undefined }, handler);
   }
   // The inline-card template for hosts that render MCP Apps (lib/ui.js).
   registerUi(server);

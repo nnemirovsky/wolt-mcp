@@ -31,8 +31,8 @@ assert.equal(imageUrlOf(null), null);
 assert.equal(imageUrlOf({ nope: 1 }), null);
 
 const r = rich("products", { query: "milk", items: [{ itemId: "1" }] });
-assert.deepEqual(JSON.parse(r.content[0].text), { query: "milk", items: [{ itemId: "1" }] }, "the text is the plain JSON the model always read");
-assert.deepEqual(r.structuredContent, { view: "products", query: "milk", items: [{ itemId: "1" }] }, "structuredContent adds the view");
+assert.deepEqual(JSON.parse(r.content[0].text), { view: "products", query: "milk", items: [{ itemId: "1" }] }, "the text is the JSON the model always read, tagged with the view");
+assert.deepEqual(r.structuredContent, { view: "products", query: "milk", items: [{ itemId: "1" }] }, "structuredContent is the same object");
 
 // Through a real client, in memory.
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -65,6 +65,9 @@ assert.match(html, /prefers-color-scheme: dark/, "follows the host's dark mode")
 // kick-off must come after every declaration it uses.
 assert(html.indexOf('var root = document.getElementById("root")') < html.indexOf('request("ui/initialize"'), "root is looked up before the host handshake starts");
 assert(html.lastIndexOf("fromOpenAI();") > html.indexOf("function draw("), "the first ChatGPT render runs after the drawing code is defined");
+for (const shape of ["structuredContent", "toolResponseMetadata", "call_tool_result", "setInterval"]) {
+  assert(html.includes(shape), `the bridge handles late or wrapped ChatGPT data (${shape})`);
+}
 
 // show_picks through the client: foreign hosts are stripped, Wolt's kept.
 const picks = await client.callTool({ name: "show_picks", arguments: { title: "Dinner", items: [
@@ -72,6 +75,8 @@ const picks = await client.callTool({ name: "show_picks", arguments: { title: "D
   { name: "Cake", imageUrl: "https://cdn.example.com/cake.jpg", url: "https://example.com/" }
 ] } });
 assert.equal(picks.structuredContent.view, "picks");
+assert.equal(picks._meta?.["openai/outputTemplate"], UI_RESOURCE_URI, "the result itself names the card template");
+assert.equal(picks._meta?.ui?.resourceUri, UI_RESOURCE_URI);
 assert.equal(picks.structuredContent.items[0].imageUrl, "https://imageproxy.wolt.com/assets/1");
 assert.equal(picks.structuredContent.items[0].url, "https://wolt.com/en/geo/x/restaurant/y");
 assert.equal(picks.structuredContent.items[1].imageUrl, undefined, "a foreign picture is dropped");

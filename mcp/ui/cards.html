@@ -73,15 +73,48 @@
     if (hostContext.theme) document.documentElement.setAttribute("data-theme", hostContext.theme);
     if (hostContext.locale) document.documentElement.lang = hostContext.locale;
   }
-  // ChatGPT globals: data may already be there, or arrive via a globals event
-  // (whose detail.globals carries the changed values).
+  // ChatGPT globals: data may already be there, arrive via a globals event
+  // (whose detail.globals carries the changed values), or show up later
+  // without any event, so this is also polled for a while. The payload has
+  // been seen bare, wrapped as {result: {structuredContent}}, and only inside
+  // toolResponseMetadata (the full tool-result envelope); the text content
+  // block carries the same JSON, so that is the last resort.
+  function unwrap(x, depth) {
+    depth = depth || 0;
+    if (!x || typeof x !== "object" || depth > 4) return null;
+    if (typeof x.view === "string") return x;
+    var keys = ["structuredContent", "result", "call_tool_result", "mcp_tool_result", "toolOutput"];
+    for (var i = 0; i < keys.length; i++) { var r = unwrap(x[keys[i]], depth + 1); if (r) return r; }
+    if (Array.isArray(x.content)) {
+      for (var j = 0; j < x.content.length; j++) {
+        var c = x.content[j];
+        if (c && c.type === "text" && typeof c.text === "string" && c.text.charAt(0) === "{") {
+          try { var parsed = JSON.parse(c.text); if (parsed && typeof parsed.view === "string") return parsed; } catch (e) {}
+        }
+      }
+    }
+    return null;
+  }
   function fromOpenAI(ev) {
+    if (rendered) return;
     var g = (ev && ev.detail && ev.detail.globals) || {};
     var o = window.openai || {};
     var theme = g.theme || o.theme;
     if (theme) document.documentElement.setAttribute("data-theme", theme);
-    var out = g.toolOutput || o.toolOutput;
+    var out = unwrap(g.toolOutput) || unwrap(o.toolOutput) || unwrap(g.toolResponseMetadata) || unwrap(o.toolResponseMetadata);
     if (out) render(out);
+  }
+  // What the host did hand over, for the fallback message: each global and
+  // whether it holds anything.
+  function globalsSummary() {
+    var o = window.openai;
+    if (!o) return "no ChatGPT globals; MCP Apps host sent no tool result";
+    var names = ["toolInput", "toolOutput", "toolResponseMetadata", "widgetState", "displayMode", "theme", "locale"], parts = [];
+    for (var i = 0; i < names.length; i++) {
+      var v = o[names[i]];
+      parts.push(names[i] + "=" + (v == null ? "null" : typeof v === "object" ? (Array.isArray(v) ? "array" : "{" + Object.keys(v).slice(0, 6).join(",") + "}") : String(v).slice(0, 12)));
+    }
+    return "ChatGPT globals: " + parts.join(" ");
   }
 
   // Talk back through the host: a follow-up message goes to the model, so a
@@ -280,12 +313,14 @@
     .then(function (res) { applyContext(res.hostContext || {}); notify("ui/notifications/initialized", {}); });
   window.addEventListener("openai:set_globals", fromOpenAI);
   fromOpenAI();
-  // Never leave a silent "Loading…": say what the host did and didn't send.
-  setTimeout(function () {
-    if (rendered) return;
-    var o = window.openai;
-    root.textContent = "No data from the host yet" + (o ? " (ChatGPT globals present, toolOutput " + (o.toolOutput ? "set" : "empty") + ")" : " (no ChatGPT globals; MCP Apps host did not send a tool result)") + ".";
-  }, 4000);
+  // Poll for late data, and never leave a silent "Loading…": after a few
+  // seconds say what the host did and didn't send, then keep polling.
+  var polls = 0;
+  var poller = setInterval(function () {
+    if (rendered || ++polls > 60) return clearInterval(poller);
+    fromOpenAI();
+    if (!rendered && polls === 8) { root.className = "muted"; root.textContent = "No data from the host yet (" + globalsSummary() + ")."; }
+  }, 500);
 })();
 </script>
 </body>
