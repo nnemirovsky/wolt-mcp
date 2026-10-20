@@ -116,9 +116,17 @@ try {
   r = await postForm("/authorize", { ...authz, approve: "1", secret: "wrong" }, { headers: { origin: publicUrl } });
   assert.equal(r.status, 403);
   assert.match(await r.text(), /wrong/);
-  // Cross-site post: blocked even with the right secret.
+  // Cross-site post: blocked even with the right secret, whichever signal says so.
   r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: "https://evil.example" } });
   assert.equal(r.status, 403);
+  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl, "sec-fetch-site": "cross-site" } });
+  assert.equal(r.status, 403, "Sec-Fetch-Site wins over a spoofable Origin");
+  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: "null", "sec-fetch-site": "none" } });
+  assert.equal(r.status, 403, "a direct navigation is not an approval");
+  // What a real browser sends: Origin may be "null" under a strict referrer
+  // policy, Sec-Fetch-Site says same-origin — that must pass.
+  r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: "null", "sec-fetch-site": "same-origin" } });
+  assert.equal(r.status, 302, "browser-shaped same-origin post is accepted");
   // The real thing.
   r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET }, { headers: { origin: publicUrl } });
   assert.equal(r.status, 302, "right secret → redirect with code");
