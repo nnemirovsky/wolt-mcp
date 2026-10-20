@@ -28,7 +28,14 @@ const EXPIRY_MARGIN_MS = 2 * 60 * 1000; // refresh when <2 min left
 // Shown (via a tool error) the first time an authed action is attempted with no
 // usable token. Written as an instruction to the client model so it relays a
 // warm, non-technical setup prompt to the user rather than dumping an error.
-export const NEEDS_TOKEN_MESSAGE = (hadExpired) =>
+//
+// A remote server (docs/remote.md) has no browser to drive, so the message
+// points at the local `npx -y wolt-mcp login` helper instead; serveHttp flips
+// the flag once at startup.
+let remoteMode = false;
+export function setRemoteMode(on) { remoteMode = !!on; }
+
+export const NEEDS_TOKEN_MESSAGE = (hadExpired) => remoteMode ? NEEDS_TOKEN_MESSAGE_REMOTE(hadExpired) :
   `SETUP NEEDED — relay this to the user warmly, don't show it as an error:\n\n` +
   `${hadExpired ? "Your Wolt sign-in expired and I can't refresh it." : "To use your Wolt cart, I need to connect to your Wolt account once."} ` +
   `The easy way (no technical steps): I'll run login_via_chrome — a browser window opens on wolt.com, ` +
@@ -38,6 +45,17 @@ export const NEEDS_TOKEN_MESSAGE = (hadExpired) =>
   `On Firefox or Safari, they can instead open a logged-in wolt.com tab, go to DevTools → Network, ` +
   `find a POST to authentication.wolt.com/v1/wauth2/access_token, copy "refresh_token" from the request ` +
   `payload, and paste it here — I'll store it with set_wolt_token.\n\n` +
+  `(Searching stores works without this — it's only needed for your cart and account.)`;
+
+const NEEDS_TOKEN_MESSAGE_REMOTE = (hadExpired) =>
+  `SETUP NEEDED — relay this to the user warmly, don't show it as an error:\n\n` +
+  `${hadExpired ? "Your Wolt sign-in expired and this server can't refresh it." : "To use your Wolt cart, this server needs to be connected to your Wolt account once."} ` +
+  `This wolt-mcp runs on a remote server, so the browser login has to happen on your own computer: ` +
+  `run \`npx -y wolt-mcp login\` in a terminal there (needs Node 22+ and Chrome, Edge, Brave or another Chromium browser). ` +
+  `A browser window opens on wolt.com in a separate, empty profile; log in normally, and the command prints a refresh token. ` +
+  `Paste that token here and I'll store it with set_wolt_token — it renews itself afterwards.\n\n` +
+  `On Firefox or Safari, they can instead open a logged-in wolt.com tab, go to DevTools → Network, ` +
+  `find a POST to authentication.wolt.com/v1/wauth2/access_token, copy "refresh_token" from the request payload, and paste that.\n\n` +
   `(Searching stores works without this — it's only needed for your cart and account.)`;
 
 export function jwtExpiryMs(token) {
@@ -196,4 +214,11 @@ export function describeTokens() {
     autoRefresh: !!(state.refreshToken || state.rotatedRefreshToken),
     stateFile: STATE_FILE
   };
+}
+
+// The freshest refresh token we hold — the latest rotation, else the bootstrap
+// — for `wolt-mcp login` to print so it can be pasted into a remote server.
+export function exportRefreshToken() {
+  const state = currentState();
+  return state.rotatedRefreshToken || state.refreshToken || null;
 }
