@@ -12,9 +12,14 @@ import { createHash, randomBytes, generateKeyPairSync, sign } from "node:crypto"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-import { buildServer, VERSION, TOOL_ANNOTATIONS } from "../server.mjs";
-import { serveHttp, remoteConfig, parseHttpArgs } from "../lib/remote.js";
-import { verifyAccessJwt, isAcceptableRedirectUri } from "../lib/oauth.js";
+// The lib modules resolve their default state dir from the environment at
+// import time, so it is pointed at a scratch directory BEFORE they load: this
+// test must never read or write the real ~/.wolt-mcp.
+const stateDir = mkdtempSync(join(tmpdir(), "wolt-remote-"));
+process.env.WOLT_STATE_DIR = stateDir;
+const { buildServer, VERSION, TOOL_ANNOTATIONS } = await import("../server.mjs");
+const { serveHttp, remoteConfig, parseHttpArgs } = await import("../lib/remote.js");
+const { verifyAccessJwt, isAcceptableRedirectUri } = await import("../lib/oauth.js");
 
 const freePort = () => new Promise((resolve) => {
   const s = createServer().listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)); });
@@ -42,7 +47,6 @@ assert(!isAcceptableRedirectUri("https://x.example/cb#frag"));
 // --- a server in OAuth mode with the approve-secret guard ---
 const port = await freePort();
 const publicUrl = `http://127.0.0.1:${port}`;
-const stateDir = mkdtempSync(join(tmpdir(), "wolt-remote-"));
 const SECRET = ["correct", "horse", "battery", "staple"].join("-"); // the approve-page secret for this test
 const API_TOKEN = b64url(randomBytes(32));
 const srv = await serveHttp({
@@ -195,6 +199,80 @@ try {
   assert.equal(r.status, 200, "configured API token is accepted");
   r = await mcpPost({ authorization: `Bearer ${API_TOKEN.slice(0, -1)}x` });
   assert.equal(r.status, 401);
+
+  // --- per-connection Wolt accounts ---
+  // wolt_status through a bearer, parsed. getAccessToken() is exercised for
+  // real: with no token it fails with the remote setup message (no network),
+  // with a stored unexpired JWT it returns it (no network either).
+  const statusVia = async (bearer) => {
+    const c = new Client({ name: "remote-test", version: "1" }, { capabilities: {} });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`${publicUrl}/mcp`), { requestInit: { headers: { authorization: `Bearer ${bearer}` } } }));
+    const out = await c.callTool({ name: "wolt_status", arguments: {} });
+    await c.close();
+    return JSON.parse(out.content[0].text);
+  };
+  // The grant approved above pasted nothing: it uses the server's own account,
+  // which in this scratch state dir is not connected — and remotely the IP is
+  // never used as a location guess.
+  let st = await statusVia(rotated.access_token);
+  assert.equal(st.loginNeeded, true);
+  assert.match(st.loginDetail, /npx -y wolt-mcp login/, "remote setup message names the local login helper");
+  assert.equal(st.stateFile, join(stateDir, "tokens.json"), "default slot is the server's state dir");
+  assert.equal(st.location.label, "not set (estimated from IP on first search)");
+  // The approve page says the server has no account yet (the paste field is open).
+  r = await get(`/authorize?${new URLSearchParams(authz)}`);
+  assert.match(await r.text(), /no Wolt account connected yet/);
+
+  // Approve with a pasted refresh token. Wolt's token endpoint is stubbed:
+  // it rotates the refresh token and returns an access JWT valid for an hour.
+  const fakeJwt = `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))}.sig`;
+  const realFetch = globalThis.fetch;
+  let woltCalls = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).startsWith("https://authentication.wolt.com/")) {
+      const refresh = new URLSearchParams(String(init.body)).get("refresh_token");
+      woltCalls.push(refresh);
+      if (refresh === "pasted-refresh-token") return new Response(JSON.stringify({ access_token: fakeJwt, refresh_token: "rotated-by-wolt" }), { status: 200 });
+      return new Response("invalid_grant", { status: 401 });
+    }
+    return realFetch(url, init);
+  };
+  try {
+    r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET, wolt_token: "%22bad-token%22" }, { headers: { origin: publicUrl } });
+    assert.equal(r.status, 403, "a refresh token Wolt rejects is caught on the page");
+    assert.match(await r.text(), /did not accept that refresh token/);
+    assert.deepEqual(woltCalls, ["bad-token"], "cookie wrapping is peeled before the exchange");
+
+    r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET, wolt_token: "pasted-refresh-token" }, { headers: { origin: publicUrl } });
+    assert.equal(r.status, 302, "a working refresh token is accepted");
+    const code3 = new URL(r.headers.get("location")).searchParams.get("code");
+    r = await postForm("/token", { grant_type: "authorization_code", code: code3, redirect_uri: redirectUri, client_id: reg.client_id, code_verifier: verifier });
+    assert.equal(r.status, 200);
+    const own = await r.json();
+
+    st = await statusVia(own.access_token);
+    assert.equal(st.loginNeeded, false, "the pasted account is connected");
+    assert.match(st.stateFile, new RegExp(`^${stateDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/accounts/[A-Za-z0-9_-]+/tokens\.json$`), "its tokens live in an account slot");
+    assert.equal(statSync(st.stateFile).mode & 0o077, 0, "slot tokens are owner-only");
+    const slot = JSON.parse(readFileSync(st.stateFile, "utf8"));
+    assert.equal(slot.refreshToken, "pasted-refresh-token", "the paste stays pinned as bootstrap");
+    assert.equal(slot.rotatedRefreshToken, "rotated-by-wolt", "the rotation from validation is kept");
+    assert.equal(st.location.label, "not set (estimated from IP on first search)", "a new account has no location until it sets one");
+    // Still unaffected: the default slot.
+    st = await statusVia(rotated.access_token);
+    assert.equal(st.loginNeeded, true);
+    // The account survives a refresh of the OAuth grant.
+    r = await postForm("/token", { grant_type: "refresh_token", refresh_token: own.refresh_token, client_id: reg.client_id });
+    assert.equal(r.status, 200);
+    st = await statusVia((await r.json()).access_token);
+    assert.equal(st.loginNeeded, false, "refreshed grant keeps its account");
+    // Now that an account exists in the default slot? No — it is per-slot, so the
+    // approve page still offers the paste field open for the server account.
+    r = await get(`/authorize?${new URLSearchParams(authz)}`);
+    assert.match(await r.text(), /no Wolt account connected yet/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 } finally {
   await srv.close();
 }
