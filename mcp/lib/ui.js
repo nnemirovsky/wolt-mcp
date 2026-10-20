@@ -1,0 +1,90 @@
+// Inline cards for hosts that render MCP Apps (ChatGPT, Claude): pictures,
+// prices and ratings instead of a JSON dump, for the tools whose results are
+// things to look at — products, dishes, venues, a planned cart, a basket, a
+// checkout total.
+//
+// How it fits together: one HTML resource (ui/cards.html) is registered under
+// a ui:// URI, and each "render" tool points at it from _meta.ui.resourceUri
+// (plus ChatGPT's older alias, openai/outputTemplate). Those tools return
+// their usual JSON as text AND the same object as structuredContent with a
+// `view` field; the host hands structuredContent to the iframe, which draws
+// the matching view. Hosts without MCP Apps ignore all of it and see exactly
+// what they saw before. Nothing here is required for the tools to work.
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const UI_RESOURCE_URI = "ui://wolt-mcp/cards.html";
+export const UI_MIME = "text/html;profile=mcp-app";
+// Where the pictures come from. Wolt serves every product, venue and brand
+// image through imageproxy.wolt.com without auth, so a host that enforces the
+// widget's CSP needs that origin on its image allowlist.
+export const IMAGE_HOSTS = ["https://imageproxy.wolt.com", "https://wolt.com", "https://*.wolt.com"];
+
+const HTML_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "ui", "cards.html");
+let html = null;
+export function widgetHtml() {
+  if (html === null) html = readFileSync(HTML_PATH, "utf8");
+  return html;
+}
+
+// The tools that render, with the status lines ChatGPT shows while and after
+// the call. Everything else stays text-only on purpose: a tool that changes
+// something should read as a sentence from the model, not as a card.
+export const RENDER_TOOLS = {
+  search_products: ["Searching Wolt stores…", "Products found"],
+  search_restaurant_dishes: ["Searching restaurants…", "Dishes found"],
+  plan_cart: ["Planning the cart…", "Cart planned"],
+  get_venue_menu: ["Opening the menu…", "Menu loaded"],
+  get_venue: ["Looking up the venue…", "Venue details"],
+  top_venues: ["Ranking venues nearby…", "Venues ranked"],
+  search_venues: ["Searching venues…", "Venues found"],
+  get_feed: ["Reading the feed…", "Feed loaded"],
+  get_baskets: ["Reading your baskets…", "Baskets"],
+  checkout_preview: ["Pricing the basket…", "Checkout preview"]
+};
+
+export function uiMeta(toolName) {
+  const status = RENDER_TOOLS[toolName];
+  if (!status) return undefined;
+  return {
+    ui: { resourceUri: UI_RESOURCE_URI },
+    "openai/outputTemplate": UI_RESOURCE_URI,
+    "openai/toolInvocation/invoking": status[0],
+    "openai/toolInvocation/invoked": status[1]
+  };
+}
+
+const resourceMeta = {
+  ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: IMAGE_HOSTS } },
+  "openai/widgetDescription": "Wolt products, dishes, venues and your cart, with pictures, prices and ratings.",
+  "openai/widgetPrefersBorder": true,
+  "openai/widgetCSP": { connect_domains: [], resource_domains: IMAGE_HOSTS }
+};
+
+export function registerUi(server) {
+  server.registerResource(
+    "wolt-cards",
+    UI_RESOURCE_URI,
+    { title: "Wolt cards", description: "Inline cards for wolt-mcp results.", mimeType: UI_MIME, _meta: resourceMeta },
+    async () => ({ contents: [{ uri: UI_RESOURCE_URI, mimeType: UI_MIME, text: widgetHtml(), _meta: resourceMeta }] })
+  );
+}
+
+// A render tool's result: the JSON the model has always read, plus the same
+// object as structuredContent tagged with the view the iframe should draw.
+export function rich(view, obj) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(obj, null, 2) }],
+    structuredContent: { view, ...obj }
+  };
+}
+
+// Wolt image references come as a URL string or as {url, blurhash}; a few
+// records carry an array of those. One accessor for all of them.
+export function imageUrlOf(ref) {
+  if (!ref) return null;
+  if (typeof ref === "string") return ref;
+  if (Array.isArray(ref)) return imageUrlOf(ref[0]);
+  return typeof ref.url === "string" ? ref.url : null;
+}

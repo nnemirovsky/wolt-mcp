@@ -30,6 +30,7 @@ Full walkthrough in [docs/setup.md](docs/setup.md); internals in [docs/architect
 - **Browse** — venue details and opening hours, category trees, full menus (including large grocery catalogs), and dish option groups with required/conditional choices.
 - **Cart** — recipe → single-store plan, merge-safe basket writes with dish options, line editing, and a checkout preview showing your real total including delivery and fees.
 - **Account** — saved addresses, order history (so "order my usual" works), favorites, payment methods, geocoding.
+- **Pictures and ratings** — product and venue images and venue scores come with every result, and in ChatGPT and Claude the search, menu, cart and checkout tools render as inline cards (MCP Apps), so you can shop by looking rather than by reading JSON.
 
 ## How it works
 
