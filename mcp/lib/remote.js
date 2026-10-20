@@ -181,13 +181,14 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
 
     // The Allow click (and the secret, when that's the guard) must come from
     // our own page: a cross-site form post could otherwise approve a client
-    // the user never saw. Browsers send Origin on every form POST.
+    // the user never saw. Sec-Fetch-Site is the reliable signal; Origin is the
+    // fallback for browsers without it, and it can legitimately be "null"
+    // (a strict referrer policy does that), which is treated as unknown.
     if (req.method === "POST") {
+      const site = req.headers["sec-fetch-site"];
       const origin = req.headers.origin;
-      const sameSite = req.headers["sec-fetch-site"];
-      if ((origin && origin !== cfg.publicUrl) || (!origin && sameSite && sameSite !== "same-origin")) {
-        return page(res, 403, "Blocked", "<p>This approval did not come from the approve page itself.</p>");
-      }
+      const sameOrigin = site ? site === "same-origin" : (origin && origin !== "null" ? origin === cfg.publicUrl : false);
+      if (!sameOrigin) return page(res, 403, "Blocked", "<p>This approval did not come from the approve page itself.</p>");
     }
 
     let verdict;
@@ -286,7 +287,7 @@ function redirect(res, location) {
   res.end();
 }
 function page(res, status, title, bodyHtml) {
-  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" });
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — wolt-mcp</title>` +
     `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}</style></head>` +
     `<body><h1>${esc(title)}</h1>${bodyHtml}<p class="muted">wolt-mcp</p></body></html>`);
