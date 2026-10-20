@@ -101,6 +101,9 @@ try {
   assert.equal(r.status, 200, "GET /authorize renders the approve page");
   const html = await r.text();
   assert.match(html, /test client/);
+  // The browser enforces form-action on the redirect that follows the POST,
+  // so the client's callback origin must be allowed alongside 'self'.
+  assert.match(r.headers.get("content-security-policy"), /form-action 'self' http:\/\/localhost:43123;/);
   assert.match(html, /name="secret"/);
   // Unknown client / foreign redirect: shown, never redirected.
   r = await get(`/authorize?${new URLSearchParams({ ...authz, client_id: "nope" })}`);
