@@ -11,7 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 process.env.WOLT_STATE_DIR = mkdtempSync(join(tmpdir(), "wolt-ui-"));
 const { buildServer } = await import("../server.mjs");
-const { rich, imageUrlOf, RENDER_TOOLS, UI_RESOURCE_URI, UI_MIME, IMAGE_HOSTS } = await import("../lib/ui.js");
+const { rich, imageUrlOf, RENDER_TOOLS, UI_RESOURCE_URI, UI_MIME, IMAGE_HOSTS, IMAGE_HINT } = await import("../lib/ui.js");
 
 assert.equal(imageUrlOf("https://imageproxy.wolt.com/a"), "https://imageproxy.wolt.com/a");
 assert.equal(imageUrlOf({ url: "https://imageproxy.wolt.com/b", blurhash: "x" }), "https://imageproxy.wolt.com/b");
@@ -56,6 +56,7 @@ for (const t of tools) {
   const isRender = !!RENDER_TOOLS[t.name];
   assert.equal(t._meta?.ui?.resourceUri, isRender ? UI_RESOURCE_URI : undefined, `${t.name} ${isRender ? "renders cards" : "stays text-only"}`);
   assert.equal(t._meta?.["openai/outputTemplate"], isRender ? UI_RESOURCE_URI : undefined);
+  assert.equal(t.description.endsWith(IMAGE_HINT), isRender, `${t.name}: ${isRender ? "tells the model the photos are Wolt's" : "carries no image hint"}`);
   if (isRender) {
     assert.equal(typeof t._meta["openai/toolInvocation/invoking"], "string");
     assert.equal(t.annotations.readOnlyHint, true, `${t.name}: only read-only tools render cards`);

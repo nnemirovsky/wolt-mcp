@@ -55,8 +55,9 @@ const publicUrl = `http://127.0.0.1:${port}`;
 const SECRET = ["correct", "horse", "battery", "staple"].join("-"); // the approve-page secret for this test
 const API_TOKEN = b64url(randomBytes(32));
 const realFetch = globalThis.fetch;
+const logLines = [];
 const srv = await serveHttp({
-  buildServer, version: VERSION, port, host: "127.0.0.1", log: noLog,
+  buildServer, version: VERSION, port, host: "127.0.0.1", log: (l) => logLines.push(l),
   env: { WOLT_STATE_DIR: stateDir, WOLT_PUBLIC_URL: publicUrl, WOLT_OAUTH_APPROVE_SECRET: SECRET, WOLT_API_TOKENS: API_TOKEN,
     WOLT_OAUTH_CLIENT_ID: "static-client", WOLT_OAUTH_CLIENT_SECRET: "static-secret-with-enough-length" }
 });
@@ -290,6 +291,9 @@ try {
   }
 } finally {
   globalThis.fetch = realFetch;
+  // The access log names the JSON-RPC method and the client, never parameters.
+  assert(logLines.some((l) => /^POST \/mcp tools\/list \(\S+\) 200 \d+ms$/.test(l)), `a tools/list line is logged: ${logLines.filter((l) => l.includes("/mcp")).slice(-3).join(" | ")}`);
+  assert(!logLines.some((l) => l.includes(API_TOKEN)), "tokens never reach the log");
   await srv.close();
 }
 

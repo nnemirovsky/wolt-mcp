@@ -100,6 +100,8 @@ Every item and venue carries an `imageUrl` (Wolt serves all images from `imagepr
 
 Feed and venue search are `auth: "optional"`: personalised when the account is connected, public otherwise, so they work before any login.
 
+The render tools' descriptions end with `IMAGE_HINT` (and the server instructions repeat it): the `imageUrl` values are Wolt's own photos and the model should show or link those rather than reach for an image search. That matters on hosts that don't draw the cards, where the model writes the whole answer and otherwise fills the picture slot with stock photos.
+
 ## Testing
 
 - `npm test` — offline unit tests (no network, no credentials), including a release guard that package.json, manifest.json and the lockfile carry the same version.
