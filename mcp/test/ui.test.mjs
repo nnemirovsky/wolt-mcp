@@ -11,7 +11,17 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 process.env.WOLT_STATE_DIR = mkdtempSync(join(tmpdir(), "wolt-ui-"));
 const { buildServer } = await import("../server.mjs");
-const { rich, imageUrlOf, RENDER_TOOLS, UI_RESOURCE_URI, UI_MIME, IMAGE_HOSTS, IMAGE_HINT } = await import("../lib/ui.js");
+const { rich, imageUrlOf, woltImageUrl, woltLinkUrl, RENDER_TOOLS, UI_RESOURCE_URI, UI_MIME, IMAGE_HOSTS, IMAGE_HINT } = await import("../lib/ui.js");
+
+// show_picks takes URLs from the model: only Wolt's hosts pass.
+assert.equal(woltImageUrl("https://imageproxy.wolt.com/assets/abc"), "https://imageproxy.wolt.com/assets/abc");
+assert.equal(woltImageUrl("https://images.example.com/x.jpg"), null);
+assert.equal(woltImageUrl("http://imageproxy.wolt.com/assets/abc"), null, "https only");
+assert.equal(woltImageUrl("not a url"), null);
+assert.equal(woltLinkUrl("https://wolt.com/en/geo/x/restaurant/y"), "https://wolt.com/en/geo/x/restaurant/y");
+assert.equal(woltLinkUrl("https://evil.example/wolt.com"), null);
+for (const t of ["get_venue", "get_venue_menu"]) assert(!RENDER_TOOLS[t], `${t} is a research step and stays text-only`);
+assert(RENDER_TOOLS.show_picks, "the curated shortlist renders");
 
 assert.equal(imageUrlOf("https://imageproxy.wolt.com/a"), "https://imageproxy.wolt.com/a");
 assert.equal(imageUrlOf({ url: "https://imageproxy.wolt.com/b", blurhash: "x" }), "https://imageproxy.wolt.com/b");
@@ -46,10 +56,26 @@ assert.match(html, /^<!doctype html>/i);
 assert.match(html, /"ui\/initialize"/, "speaks the MCP Apps handshake");
 assert.match(html, /ui\/notifications\/tool-result/);
 assert.match(html, /window\.openai/, "and ChatGPT's globals as a fallback");
-for (const view of ["products", "dishes", "menu", "venues", "venue", "plan", "baskets", "checkout"]) {
+for (const view of ["picks", "products", "dishes", "menu", "venues", "venue", "plan", "baskets", "checkout"]) {
   assert.match(html, new RegExp(`case "${view}"`), `renders the ${view} view`);
 }
 assert.match(html, /prefers-color-scheme: dark/, "follows the host's dark mode");
+// ChatGPT has window.openai.toolOutput set before the script runs, so the
+// first render happens during setup: the root must exist by then, and the
+// kick-off must come after every declaration it uses.
+assert(html.indexOf('var root = document.getElementById("root")') < html.indexOf('request("ui/initialize"'), "root is looked up before the host handshake starts");
+assert(html.lastIndexOf("fromOpenAI();") > html.indexOf("function draw("), "the first ChatGPT render runs after the drawing code is defined");
+
+// show_picks through the client: foreign hosts are stripped, Wolt's kept.
+const picks = await client.callTool({ name: "show_picks", arguments: { title: "Dinner", items: [
+  { name: "Soup", price: 1200, currency: "EUR", imageUrl: "https://imageproxy.wolt.com/assets/1", url: "https://wolt.com/en/geo/x/restaurant/y" },
+  { name: "Cake", imageUrl: "https://cdn.example.com/cake.jpg", url: "https://example.com/" }
+] } });
+assert.equal(picks.structuredContent.view, "picks");
+assert.equal(picks.structuredContent.items[0].imageUrl, "https://imageproxy.wolt.com/assets/1");
+assert.equal(picks.structuredContent.items[0].url, "https://wolt.com/en/geo/x/restaurant/y");
+assert.equal(picks.structuredContent.items[1].imageUrl, undefined, "a foreign picture is dropped");
+assert.equal(picks.structuredContent.items[1].url, undefined, "a foreign link is dropped");
 
 const { tools } = await client.listTools();
 for (const t of tools) {
