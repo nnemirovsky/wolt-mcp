@@ -44,6 +44,16 @@ export const RENDER_TOOLS = {
   checkout_preview: ["Pricing the basket…", "Checkout preview"]
 };
 
+// Appended to every render tool's description. Hosts that don't draw the
+// cards still have a model writing the answer, and a model with a picture
+// slot to fill reaches for an image search unless told the photo is already
+// in hand.
+export const IMAGE_HINT = " Where a result carries imageUrl, that is Wolt's own photo of the item or venue on a public CDN, embeddable as-is: when you show pictures, use those URLs and never substitute stock or web-search images for them.";
+
+export function describe(toolName, description) {
+  return RENDER_TOOLS[toolName] ? description + IMAGE_HINT : description;
+}
+
 export function uiMeta(toolName) {
   const status = RENDER_TOOLS[toolName];
   if (!status) return undefined;

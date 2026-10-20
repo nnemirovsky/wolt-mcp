@@ -63,9 +63,11 @@ Tool annotations are set so clients know what each tool does before calling it: 
 
 Check it: `curl -i https://wolt.example.com/mcp -X POST` should return 401 with a `WWW-Authenticate` header, and an anonymous `curl -i https://wolt.example.com/authorize` should redirect to your `cloudflareaccess.com` login.
 
+The access log (stderr, `docker compose logs wolt-mcp`) has one line per request: `POST /mcp tools/call search_products (openai-mcp/1.0.0) 200 412ms` — the JSON-RPC method, the tool or resource, the client's product token, status and time. Parameters, results and tokens are never logged. It is the quickest way to see what a host actually does: a host that renders the inline cards asks for `resources/read ui://wolt-mcp/cards.html` after the first render tool call; one that only shows text never does.
+
 ### Connecting clients
 
-- **ChatGPT** — Settings → Plugins → Add custom MCP server: URL `https://wolt.example.com/mcp`, authentication **OAuth**. Leave the advanced settings alone (dynamic registration) or enter the static client id and secret you configured.
+- **ChatGPT** — Settings → Plugins → Add custom MCP server: URL `https://wolt.example.com/mcp`, authentication **OAuth**. Leave the advanced settings alone (dynamic registration) or enter the static client id and secret you configured. ChatGPT copies the tool list when the connector is created and does not re-read it on its own: after upgrading the server, open the connector's settings and **Refresh** it, or new tools, descriptions and the inline cards stay invisible.
 - **Claude.ai / Claude iPhone app** — Settings → Connectors → Add custom connector with the same URL; the connector syncs to the mobile app.
 - **Claude Code** — `claude mcp add --transport http wolt https://wolt.example.com/mcp`, then `/mcp` to authenticate.
 - **Anything with a fixed bearer header** — put a `WOLT_API_TOKENS` entry in its `Authorization: Bearer …` header.

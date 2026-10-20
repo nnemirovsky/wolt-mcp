@@ -104,7 +104,7 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
   const server = createServer((req, res) => {
     const started = Date.now();
     const path = (req.url || "/").split("?")[0];
-    res.on("finish", () => log(`${req.method} ${path} ${res.statusCode} ${Date.now() - started}ms`));
+    res.on("finish", () => log(`${req.method} ${path}${req.rpcLabel ? ` ${req.rpcLabel}` : ""} ${res.statusCode} ${Date.now() - started}ms`));
     handle(req, res, path).catch((e) => {
       if (e instanceof OAuthError) return sendJson(res, e.status === 302 ? 400 : e.status, e.body());
       log(`error on ${req.method} ${path}: ${e?.stack || e}`);
@@ -183,12 +183,18 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
       }
       stateDir = accountId ? accountStateDir(cfg.stateDir, accountId) : cfg.stateDir;
     } catch (e) { return sendJson(res, 401, { error: "invalid_token", error_description: "token refers to an unknown account" }); }
+    // The body is read here rather than by the transport so the access log
+    // can name the JSON-RPC method, the tool or the resource — which is how
+    // you tell "the host never asked for the card template" from "the card
+    // broke" — and the client. Parameters and results are never logged.
+    const body = await readBody(req);
+    req.rpcLabel = `${rpcLabel(body)} (${clientName(req)})`;
     await withStateDir(stateDir, async () => {
       const mcpServer = buildServer({ remote: true });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => { mcpServer.close().catch(() => {}); });
       await mcpServer.connect(transport);
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, body);
     });
   }
 
@@ -350,6 +356,24 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 
 function clientIp(req) {
   return String(req.headers["cf-connecting-ip"] || req.socket?.remoteAddress || "unknown");
+}
+
+// "tools/call search_products", "resources/read ui://…", "initialize"; a
+// batch joins its members, a bare response or notification reads as such.
+function rpcLabel(body) {
+  const msgs = (Array.isArray(body) ? body : [body]).filter((m) => m && typeof m === "object");
+  const names = msgs.map((m) => {
+    if (typeof m.method !== "string") return "response";
+    const p = m.params || {};
+    const what = m.method === "tools/call" ? p.name : m.method === "resources/read" ? p.uri : null;
+    return typeof what === "string" ? `${m.method} ${what.slice(0, 80)}` : m.method;
+  });
+  return names.join(",") || "empty";
+}
+
+// The product token of the User-Agent, e.g. "openai-mcp/1.0.0" or "Claude-User".
+function clientName(req) {
+  return String(req.headers["user-agent"] || "-").trim().split(/\s+/)[0].slice(0, 40);
 }
 
 // Form or JSON body, capped: these endpoints only ever see a few hundred bytes.
