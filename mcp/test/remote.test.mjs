@@ -20,7 +20,7 @@ process.env.WOLT_STATE_DIR = stateDir;
 const { buildServer, VERSION, TOOL_ANNOTATIONS, woltProfile } = await import("../server.mjs");
 
 // The identity shape from Wolt's user record, old and new name formats.
-assert.deepEqual(woltProfile({ user: { id: "u1", name: { first_name: "Nikita", last_name: "N" }, email: "n@example.com", phone_number: "+1" } }), { id: "u1", name: "Nikita N", email: "n@example.com", nickname: "Nikita" });
+assert.deepEqual(woltProfile({ user: { _id: { $oid: "5f1a2b3c4d5e6f7a8b9c0d1e" }, name: { first_name: "Nikita", last_name: "N" }, email: "n@example.com", phone_number: "+1" } }), { id: "5f1a2b3c4d5e6f7a8b9c0d1e", name: "Nikita N", email: "n@example.com", nickname: "Nikita" }, "the live shape: Mongo-style id, name object");
 assert.deepEqual(woltProfile({ user: { _id: "u2", name: "Plain Name" } }), { id: "u2", name: "Plain Name" });
 assert.equal(woltProfile({ user: { name: "no id" } }), null, "no id → no profile, never an invented one");
 const { serveHttp, remoteConfig, parseHttpArgs } = await import("../lib/remote.js");

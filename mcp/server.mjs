@@ -981,12 +981,14 @@ tool(
   }
 );
 
-// Wolt's /v1/user/me wraps the record in `user`; names come as
-// {first_name, last_name} or as a plain string depending on the account's
-// age. Only the identity fields are kept — see the tool's comment.
+// Wolt's /v1/user/me wraps the record in `user`, with a Mongo-style id
+// (`_id: {$oid}`, verified live) and the name as {first_name, last_name}.
+// Plain-string ids and names are accepted too in case another endpoint
+// version shows up. Only the identity fields are kept — see the tool's comment.
 export function woltProfile(json) {
   const u = json?.user || json || {};
-  const id = u.id || u._id || u.user_id;
+  const rawId = u._id ?? u.id ?? u.user_id;
+  const id = typeof rawId === "object" && rawId ? rawId.$oid : rawId;
   if (typeof id !== "string" || !id.trim()) return null;
   const n = u.name;
   const first = typeof n === "object" && n ? n.first_name : u.first_name;
