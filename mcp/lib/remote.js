@@ -232,10 +232,13 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     const field = `<input type="hidden" name="approve" value="1">` + (cfg.guard.type === "secret"
       ? `<label>Approve secret<br><input type="password" name="secret" autocomplete="current-password" autofocus required></label>`
       : "");
+    // form-action also governs where a form POST may be *redirected*, so the
+    // client's callback origin has to be allowed or the browser drops the code.
     return page(res, error ? 403 : 200, "Allow access to your Wolt account?",
       `<p><b>${esc(request.client.name)}</b> <span class="muted">(${esc(host)})</span> wants to use this wolt-mcp server: search, your baskets, order history and favourites on the connected Wolt account.</p>` +
       (error ? `<p class="err">${esc(error)}</p>` : "") +
-      `<form method="post" action="/authorize">${hidden}${field}<p><button type="submit">Allow</button></p></form>`);
+      `<form method="post" action="/authorize">${hidden}${field}<p><button type="submit">Allow</button></p></form>`,
+      { formAction: new URL(request.redirectUri).origin });
   }
 
   function tooManyFailures(ip) {
@@ -286,8 +289,9 @@ function redirect(res, location) {
   res.writeHead(302, { Location: location, "Cache-Control": "no-store" });
   res.end();
 }
-function page(res, status, title, bodyHtml) {
-  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'" });
+function page(res, status, title, bodyHtml, { formAction } = {}) {
+  const csp = `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formAction ? ` ${formAction}` : ""}; frame-ancestors 'none'`;
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": csp });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — wolt-mcp</title>` +
     `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}</style></head>` +
     `<body><h1>${esc(title)}</h1>${bodyHtml}<p class="muted">wolt-mcp</p></body></html>`);
