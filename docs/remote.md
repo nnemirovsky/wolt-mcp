@@ -20,6 +20,10 @@ The server holds no Wolt account of its own: it is a public endpoint, and every 
 
 So one server can serve several people in several countries, each with their own Wolt login, address and currency, as long as each of them can pass the approve-page guard. A fixed `WOLT_API_TOKENS` bearer gets a slot of its own too, connected by calling `set_wolt_token` through it. Only `WOLT_HTTP_AUTH=none`, the single-user private mode, keeps using the state directory root like stdio does.
 
+## Ordering is opt-in, per connection
+
+Below the token field, the approve page has an unticked box: *allow this connection to place and pay for orders*, with an optional per-order limit. Unticked, the connection fills and prices baskets and the user pays on wolt.com, as always. Ticked, the grant carries the `order` scope (and the limit, in minor units), and `prepare_order` / `place_order` work on it: a quote with the exact total, the saved address and the saved card, then a purchase once the user confirms that total in the chat. The permission survives token refreshes and ends with the grant; connect again to change it. Fixed API tokens and the no-auth mode have no approve page, so they take it from `WOLT_ALLOW_ORDERS` and `WOLT_ORDER_CAP` instead.
+
 ## Configuration
 
 All settings are environment variables.
@@ -34,6 +38,7 @@ All settings are environment variables.
 | `WOLT_API_TOKENS` | Optional comma-separated long-lived bearer tokens (32+ characters each) for clients that can only send a fixed `Authorization` header, such as a desktop agent's "bearer token" field or an iOS Shortcut. |
 | `WOLT_HTTP_AUTH=none` | Disables auth entirely. Only for a private network you trust; it is announced loudly on stderr. |
 | `WOLT_STATE_DIR` | Where tokens and the saved location live. `/data` in Docker. |
+| `WOLT_ALLOW_ORDERS=1`, `WOLT_ORDER_CAP` | Ordering for connections without an approve page (fixed API tokens, `WOLT_HTTP_AUTH=none`, and the stdio server): allow it, and optionally cap each order (main currency unit, e.g. `50`). OAuth grants ignore these; their permission comes from the approve page. |
 
 ## How the OAuth flow works
 
@@ -45,7 +50,7 @@ wolt-mcp is both the authorization server and the protected resource. There is n
 4. The client exchanges the code at `/token` (PKCE verifier checked, client secret checked if the client has one) for an opaque bearer token valid 7 days and a refresh token valid 90 days. Refresh tokens rotate; a superseded one keeps working for a minute so a lost response doesn't strand the client.
 5. Every tool call carries `Authorization: Bearer …`. Tokens are stored hashed in `<state dir>/oauth.json`, mode 600.
 
-Tool annotations are set so clients know what each tool does before calling it: every search and read tool is `readOnlyHint: true`, basket and account writes are not, and `clear_basket` is flagged destructive. ChatGPT, for one, asks for confirmation on every tool without the read-only hint.
+Tool annotations are set so clients know what each tool does before calling it: every search and read tool is `readOnlyHint: true`, basket and account writes are not, and `clear_basket` and `place_order` are flagged destructive. ChatGPT, for one, asks for confirmation on every tool without the read-only hint.
 
 ## Deploying with Docker and Cloudflare Tunnel
 

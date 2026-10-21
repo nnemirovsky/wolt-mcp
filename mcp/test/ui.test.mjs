@@ -23,8 +23,8 @@ assert.equal(woltLinkUrl("https://evil.example/wolt.com"), null);
 for (const t of ["get_venue", "get_venue_menu", "search_products", "search_restaurant_dishes", "search_venues", "top_venues", "get_feed", "plan_cart", "get_baskets"]) {
   assert(!RENDER_TOOLS[t], `${t} is a step on the way and stays text-only`);
 }
-for (const t of ["show_picks", "checkout_preview"]) assert(RENDER_TOOLS[t], `${t} ends a turn and renders`);
-assert.equal(Object.keys(RENDER_TOOLS).length, 2, "only the two turn-ending results render");
+for (const t of ["show_picks", "checkout_preview", "prepare_order"]) assert(RENDER_TOOLS[t], `${t} ends a turn and renders`);
+assert.equal(Object.keys(RENDER_TOOLS).length, 3, "only the turn-ending results render");
 
 assert.equal(imageUrlOf("https://imageproxy.wolt.com/a"), "https://imageproxy.wolt.com/a");
 assert.equal(imageUrlOf({ url: "https://imageproxy.wolt.com/b", blurhash: "x" }), "https://imageproxy.wolt.com/b");

@@ -288,6 +288,34 @@ try {
     assert.equal(r.status, 200);
     st = await statusVia((await r.json()).access_token);
     assert.equal(st.loginNeeded, false, "refreshed grant keeps its account");
+
+    // Ordering: off on that grant, on for a grant approved with the box
+    // ticked, with the cap carried in the record and across refreshes.
+    const orderVia = async (bearer) => {
+      const c = new Client({ name: "remote-test", version: "1" }, { capabilities: {} });
+      await c.connect(new StreamableHTTPClientTransport(new URL(`${publicUrl}/mcp`), { requestInit: { headers: { authorization: `Bearer ${bearer}` } } }));
+      const out = await c.callTool({ name: "place_order", arguments: { quote_id: "6f1e0d8e-0e7a-4f1c-9a4e-2b6c7d8e9f00", total: 1 } });
+      await c.close();
+      return out.content[0].text;
+    };
+    assert.match(await orderVia(own.access_token), /not allowed to place orders/, "an ordinary grant cannot pay");
+    assert.match(html2, /name="allow_orders"/, "the approve page offers ordering");
+    assert.match(html2, /name="order_cap"/);
+    assert(!/name="allow_orders"[^>]*checked/.test(html2), "and it is off by default");
+    r = await postForm("/authorize", { ...authz, approve: "1", secret: SECRET, wolt_token: "pasted-refresh-token", allow_orders: "1", order_cap: "50" }, { headers: { origin: publicUrl } });
+    assert.equal(r.status, 302);
+    const code4 = new URL(r.headers.get("location")).searchParams.get("code");
+    r = await postForm("/token", { grant_type: "authorization_code", code: code4, redirect_uri: redirectUri, client_id: reg.client_id, code_verifier: verifier });
+    const ordered = await r.json();
+    assert.equal(ordered.scope, "wolt order", "the box, not the client's request, sets the scope");
+    const recs = Object.values(JSON.parse(readFileSync(join(stateDir, "oauth.json"), "utf8")).tokens).filter((t) => t.scope === "wolt order");
+    assert.equal(recs.length, 1);
+    assert.equal(recs[0].orderCap, 5000, "the cap is stored in minor units");
+    assert.match(await orderVia(ordered.access_token), /unknown or was replaced/, "the gate is open; only the quote is missing");
+    r = await postForm("/token", { grant_type: "refresh_token", refresh_token: ordered.refresh_token, client_id: reg.client_id });
+    const refreshedOrder = await r.json();
+    assert.equal(refreshedOrder.scope, "wolt order");
+    assert.match(await orderVia(refreshedOrder.access_token), /unknown or was replaced/, "the permission survives a refresh");
   }
 } finally {
   globalThis.fetch = realFetch;

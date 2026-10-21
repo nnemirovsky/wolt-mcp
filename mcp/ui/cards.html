@@ -294,11 +294,18 @@
         break;
       }
       case "checkout": {
+        // The same view draws checkout_preview and the order quote from
+        // prepare_order (quoteId present): the latter adds where it goes,
+        // what pays and the ETA, since the user is about to say yes to it.
         var c = data, rows = c.rows || [];
-        html = "<h2>Checkout</h2><table>" + rows.map(function (r) { return "<tr><td>" + esc(r.label || r.name || r.type) + "</td><td>" + esc(r.formatted || money(r.amount, c.currency)) + "</td></tr>"; }).join("") +
+        html = "<h2>" + (c.quoteId ? "Order quote" : "Checkout") + "</h2>" +
+          (c.quoteId ? '<div class="muted">' + [c.venue ? esc(c.venue) : "", c.deliveryTo ? "to " + esc(c.deliveryTo) : "", c.paidWith ? "paid with " + esc(c.paidWith) : "", c.eta ? "ETA " + esc(c.eta) : ""].filter(Boolean).join(" · ") + "</div>" : "") +
+          "<table>" + rows.map(function (r) { return "<tr><td>" + esc(r.label || r.name || r.type) + "</td><td>" + esc(r.formatted || money(r.amount, c.currency)) + "</td></tr>"; }).join("") +
           (c.payableAmount != null ? '<tr class="total"><td>Total</td><td>' + esc(c.payableAmountFormatted || money(c.payableAmount, c.currency)) + "</td></tr>" : "") + "</table>" +
           (c.checkoutUrl ? '<div class="actions"><button class="primary" data-act="' + act(function () { open(c.checkoutUrl); }) + '">Pay on Wolt</button></div>' : "") +
-          (c.warnings && c.warnings.length ? '<div class="note">' + esc(c.warnings.join(" ")) + "</div>" : "");
+          (c.warnings && c.warnings.length ? '<div class="note">' + esc(c.warnings.join(" ")) + "</div>" : "") +
+          (c.warning ? '<div class="note">' + esc(c.warning) + "</div>" : "") +
+          (c.quoteId ? '<div class="note">Nothing is ordered yet. Confirm the total in the chat to place it.</div>' : "");
         break;
       }
       default:

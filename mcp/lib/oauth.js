@@ -114,7 +114,7 @@ export class OAuthProvider {
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["client_secret_basic", "client_secret_post", "none"],
-      scopes_supported: ["wolt"],
+      scopes_supported: ["wolt", "order"],
       service_documentation: "https://github.com/erlaufer/wolt-mcp/blob/main/docs/remote.md"
     };
   }
@@ -124,7 +124,7 @@ export class OAuthProvider {
       resource: this.resource,
       authorization_servers: [this.issuer],
       bearer_methods_supported: ["header"],
-      scopes_supported: ["wolt"],
+      scopes_supported: ["wolt", "order"],
       resource_name: "wolt-mcp"
     };
   }
@@ -198,9 +198,12 @@ export class OAuthProvider {
     return { client, redirectUri, codeChallenge: q.code_challenge, state: q.state || null, scope: q.scope || "wolt" };
   }
 
-  issueCode({ client, redirectUri, codeChallenge, state, scope, who, accountId = null }) {
+  // scope is what the approve page granted ("wolt", or "wolt order" when the
+  // ordering box was ticked), not what the client asked for; orderCap is the
+  // optional per-order ceiling in minor units that goes with "order".
+  issueCode({ client, redirectUri, codeChallenge, state, scope, who, accountId = null, orderCap = null }) {
     const code = randomToken(32);
-    this.codes.set(code, { clientId: client.clientId, redirectUri, codeChallenge, scope, who: who || null, accountId, exp: this.now() + CODE_TTL_MS });
+    this.codes.set(code, { clientId: client.clientId, redirectUri, codeChallenge, scope, who: who || null, accountId, orderCap, exp: this.now() + CODE_TTL_MS });
     for (const [k, v] of this.codes) if (v.exp <= this.now()) this.codes.delete(k);
     return redirectWith(redirectUri, { code, ...(state ? { state } : {}) });
   }
@@ -244,7 +247,7 @@ export class OAuthProvider {
       if (rec.clientId !== client.clientId) throw new OAuthError(400, "invalid_grant", "authorization code was issued to another client");
       if (params.redirect_uri && params.redirect_uri !== rec.redirectUri) throw new OAuthError(400, "invalid_grant", "redirect_uri does not match the authorization request");
       if (!params.code_verifier || !safeEqual(sha256(params.code_verifier), rec.codeChallenge)) throw new OAuthError(400, "invalid_grant", "PKCE verification failed");
-      return this.issueTokens(client, rec.scope, rec.who, rec.accountId);
+      return this.issueTokens(client, rec.scope, rec.who, rec.accountId, rec.orderCap ?? null);
     }
     if (params.grant_type === "refresh_token") {
       const h = sha256(params.refresh_token || "");
@@ -256,18 +259,19 @@ export class OAuthProvider {
         throw new OAuthError(400, "invalid_grant", "refresh token was already rotated");
       }
       if (!rec.supersededAt) rec.supersededAt = now;
-      return this.issueTokens(client, rec.scope, rec.who, rec.accountId);
+      return this.issueTokens(client, rec.scope, rec.who, rec.accountId, rec.orderCap ?? null);
     }
     throw new OAuthError(400, "unsupported_grant_type", "use authorization_code or refresh_token");
   }
 
   // accountId: which Wolt account slot this grant uses (null = the server's
   // own). It is fixed at approval time and survives every refresh.
-  issueTokens(client, scope, who, accountId = null) {
+  // The ordering permission (scope "order" + orderCap) travels the same way.
+  issueTokens(client, scope, who, accountId = null, orderCap = null) {
     const access = randomToken(32), refresh = randomToken(32);
     const now = this.now();
-    this.state.tokens[sha256(access)] = { clientId: client.clientId, scope, who, accountId, exp: now + ACCESS_TOKEN_TTL_S * 1000, issuedAt: now };
-    this.state.refreshTokens[sha256(refresh)] = { clientId: client.clientId, scope, who, accountId, exp: now + REFRESH_TOKEN_TTL_S * 1000, issuedAt: now };
+    this.state.tokens[sha256(access)] = { clientId: client.clientId, scope, who, accountId, orderCap, exp: now + ACCESS_TOKEN_TTL_S * 1000, issuedAt: now };
+    this.state.refreshTokens[sha256(refresh)] = { clientId: client.clientId, scope, who, accountId, orderCap, exp: now + REFRESH_TOKEN_TTL_S * 1000, issuedAt: now };
     this.save();
     return { access_token: access, token_type: "bearer", expires_in: ACCESS_TOKEN_TTL_S, refresh_token: refresh, scope };
   }
