@@ -29,8 +29,8 @@ export function widgetHtml() {
 }
 
 // The tools that render, with the status lines ChatGPT shows while and after
-// the call. Only the two results that end a turn are on the list: the
-// checkout total and the shortlist. Everything the model calls on the way
+// the call. Only the results that end a turn are on the list: the checkout
+// total, the order quote the user must confirm, and the shortlist. Everything the model calls on the way
 // (searches, the feed, venue ranking, venue detail, menus, the planned cart,
 // the baskets it reads before adding or clearing) stays text-only although
 // it carries pictures: a host draws one frame per call, and ChatGPT has been
@@ -41,6 +41,7 @@ export function widgetHtml() {
 // text-only too; it should read as a sentence from the model, not as a card.
 export const RENDER_TOOLS = {
   checkout_preview: ["Pricing the basket…", "Checkout preview"],
+  prepare_order: ["Quoting the order…", "Order quote"],
   show_picks: ["Laying out the picks…", "Picks"]
 };
 

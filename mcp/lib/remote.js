@@ -29,6 +29,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { OAuthProvider, OAuthError, newAccountId } from "./oauth.js";
 import { setRemoteMode, validateRefreshToken, adoptTokens } from "./auth.js";
 import { withStateDir, accountStateDir } from "./context.js";
+import { orderingFromEnv } from "./order.js";
 
 const DEFAULT_STATIC_REDIRECTS = [
   "https://chatgpt.com/connector_platform_oauth_redirect",
@@ -189,8 +190,12 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     // broke" — and the client. Parameters and results are never logged.
     const body = await readBody(req);
     req.rpcLabel = `${rpcLabel(body)} (${clientName(req)})`;
+    // May this connection pay? An OAuth grant carries the answer from its
+    // approve page (scope "order" and the cap); fixed API tokens and the
+    // no-auth mode fall back to the operator's environment.
+    const ordering = grant ? { allowed: /\border\b/.test(grant.scope || ""), cap: grant.orderCap ?? null } : orderingFromEnv(env);
     await withStateDir(stateDir, async () => {
-      const mcpServer = buildServer({ remote: true });
+      const mcpServer = buildServer({ remote: true, ordering });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => { mcpServer.close().catch(() => {}); });
       await mcpServer.connect(transport);
@@ -253,7 +258,12 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     }
     const accountId = newAccountId();
     withStateDir(accountStateDir(cfg.stateDir, accountId), () => adoptTokens(validated));
-    return redirect(res, provider.issueCode({ ...request, who: verdict.who, accountId }));
+    // Ordering is off unless the box was ticked here, whatever scope the
+    // client asked for; the optional cap is typed in major units.
+    const allowOrders = body.allow_orders === "1";
+    const capMajor = Number(String(body.order_cap || "").trim().replace(",", "."));
+    const orderCap = allowOrders && String(body.order_cap || "").trim() && Number.isFinite(capMajor) && capMajor > 0 ? Math.round(capMajor * 100) : null;
+    return redirect(res, provider.issueCode({ ...request, scope: allowOrders ? "wolt order" : "wolt", who: verdict.who, accountId, orderCap }));
   }
 
   async function token(req, res) {
@@ -288,12 +298,19 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
       `<li>Find the request to <code>authentication.wolt.com/v1/wauth2/access_token</code> and copy the <code>refresh_token</code> value from its JSON.</li></ol>` +
       `<p class="muted">The token is exchanged once now and renews itself afterwards; this connection uses only the account it belongs to.</p>` +
       `<details><summary class="muted">For developers</summary><p class="muted">From a checkout of wolt-mcp, <code>node mcp/server.mjs login</code> opens the Wolt login in a separate browser profile and prints the token (<code>npx -y wolt-mcp login</code> once a release ships it).</p></details>`;
+    // Ordering is opt-in per connection. Unticked, the connection can fill
+    // baskets and price them but never pay; ticked, place_order may charge
+    // the account's saved card, up to the cap if one is given.
+    const ordering = `<fieldset><legend>Ordering</legend>` +
+      `<label class="row"><input type="checkbox" name="allow_orders" value="1"> Allow this connection to place and pay for orders</label>` +
+      `<p class="muted">Off by default: the assistant can fill and price your basket but you pay on wolt.com. On, it can place an order with your saved card after you confirm the total in the chat. Real money, through a language model, on private Wolt endpoints: tick it only for a client you trust.</p>` +
+      `<label>Per-order limit, optional (in your currency's main unit, e.g. 50)<br><input type="text" name="order_cap" inputmode="decimal" autocomplete="off" pattern="[0-9]+([.,][0-9]{1,2})?"></label></fieldset>`;
     // form-action also governs where a form POST may be *redirected*, so the
     // client's callback origin has to be allowed or the browser drops the code.
     return page(res, error ? 403 : 200, "Allow access to your Wolt account?",
       `<p><b>${esc(request.client.name)}</b> <span class="muted">(${esc(host)})</span> wants to use this wolt-mcp server: search, your baskets, order history and favourites on the Wolt account you connect here.</p>` +
       (error ? `<p class="err">${esc(error)}</p>` : "") +
-      `<form method="post" action="/authorize">${hidden}${field}${account}<p><button type="submit">Allow</button></p></form>`,
+      `<form method="post" action="/authorize">${hidden}${field}${account}${ordering}<p><button type="submit">Allow</button></p></form>`,
       { formAction: new URL(request.redirectUri).origin });
   }
 
@@ -349,7 +366,7 @@ function page(res, status, title, bodyHtml, { formAction } = {}) {
   const csp = `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formAction ? ` ${formAction}` : ""}; frame-ancestors 'none'`;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY", "Content-Security-Policy": csp });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} — wolt-mcp</title>` +
-    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}code{font-size:.9em}ol{padding-left:1.2rem}details{margin:1rem 0}summary{cursor:pointer}a{color:inherit}</style></head>` +
+    `<style>body{font:16px/1.5 system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;color:#111;background:#fff}h1{font-size:1.4rem}button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}input{font:inherit;padding:.5rem;width:100%;box-sizing:border-box}label{display:block;margin:1rem 0}.muted{color:#666}.err{color:#b00020}code{font-size:.9em}ol{padding-left:1.2rem}details{margin:1rem 0}summary{cursor:pointer}a{color:inherit}fieldset{border:1px solid #ddd;border-radius:6px;padding:.5rem 1rem;margin:1.5rem 0}legend{padding:0 .3rem;color:#666}input[type=checkbox]{width:auto;margin-right:.5rem}.row{display:flex;align-items:center}</style></head>` +
     `<body><h1>${esc(title)}</h1>${bodyHtml}<p class="muted">wolt-mcp</p></body></html>`);
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
