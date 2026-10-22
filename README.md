@@ -30,7 +30,7 @@ Full walkthrough in [docs/setup.md](docs/setup.md); internals in [docs/architect
 - **Browse** — venue details and opening hours, category trees, full menus (including large grocery catalogs), and dish option groups with required/conditional choices.
 - **Cart** — recipe → single-store plan, merge-safe basket writes with dish options, line editing, and a checkout preview showing your real total including delivery and fees.
 - **Account** — saved addresses, order history (so "order my usual" works), favorites, payment methods, geocoding.
-- **Order** (off by default) — `prepare_order` quotes the basket with your saved address and card, `place_order` pays once you confirm that total. Enabled per connection on the approve page (or `WOLT_ALLOW_ORDERS=1` locally), optionally with a per-order limit. Saved card only; Apple Pay, cash and dishes with options still go through wolt.com.
+- **Order** (off by default) — `prepare_order` quotes the basket with your saved address and card, `place_order` pays once you confirm that total. Enabled per connection on the approve page (or `WOLT_ALLOW_ORDERS=1` locally), optionally with a per-order limit. Saved card only; Apple Pay and cash still go through wolt.com.
 - **Pictures and ratings** — product and venue images and venue scores come with every result, and in ChatGPT and Claude the checkout preview renders as an inline card (MCP Apps) and any shortlist the model recommends ends in one `show_picks` card set with the photos, so you can shop by looking rather than by reading JSON.
 
 ## How it works
