@@ -29,7 +29,12 @@ const CODE_TTL_MS = 10 * 60 * 1000;
 // the response to its refresh (network blip, process killed) can retry instead
 // of being bounced back to the browser.
 const SUPERSEDED_GRACE_MS = 60 * 1000;
-const MAX_CLIENTS = 100;
+// Registrations that never went through /authorize. The store is capped so an
+// abuser can't grow the file without bound, and only such idle registrations
+// are ever evicted: a client with a live token, refresh token or pending code
+// is a connector someone approved, and losing it would silently force every
+// host using it back through the browser.
+export const MAX_PENDING_CLIENTS = 100;
 const AUTH_METHODS = new Set(["none", "client_secret_basic", "client_secret_post"]);
 
 const sha256 = (s) => createHash("sha256").update(String(s)).digest("base64url");
@@ -131,6 +136,18 @@ export class OAuthProvider {
 
   // --- clients ---
 
+  // Client ids that something live still refers to: a token, a refresh
+  // token (expired and long-superseded ones are swept on save) or a code
+  // waiting to be exchanged.
+  clientsInUse() {
+    const now = this.now();
+    const ids = new Set();
+    for (const v of Object.values(this.state.tokens)) if (v.exp > now) ids.add(v.clientId);
+    for (const v of Object.values(this.state.refreshTokens)) if (v.exp > now) ids.add(v.clientId);
+    for (const v of this.codes.values()) if (v.exp > now) ids.add(v.clientId);
+    return ids;
+  }
+
   getClient(clientId) {
     if (!clientId) return null;
     if (this.staticClient && clientId === this.staticClient.clientId) return this.staticClient;
@@ -138,8 +155,8 @@ export class OAuthProvider {
   }
 
   // Dynamic client registration. Open by design: registering buys nothing
-  // without passing /authorize, which is where the human is. The store is
-  // capped so an abuser can't grow the file without bound.
+  // without passing /authorize, which is where the human is. Idle
+  // registrations are capped (see MAX_PENDING_CLIENTS); approved ones stay.
   registerClient(body) {
     if (!body || typeof body !== "object") throw new OAuthError(400, "invalid_client_metadata", "JSON object expected");
     const uris = body.redirect_uris;
@@ -158,10 +175,11 @@ export class OAuthProvider {
     const clientSecret = authMethod === "none" ? null : randomToken(32);
     const createdAt = this.now();
     this.state.clients[clientId] = { clientId, secretHash: clientSecret ? sha256(clientSecret) : null, redirectUris: uris, name, authMethod, createdAt };
-    const ids = Object.keys(this.state.clients);
-    if (ids.length > MAX_CLIENTS) {
-      ids.sort((a, b) => this.state.clients[a].createdAt - this.state.clients[b].createdAt);
-      for (const id of ids.slice(0, ids.length - MAX_CLIENTS)) delete this.state.clients[id];
+    const inUse = this.clientsInUse();
+    const pending = Object.keys(this.state.clients).filter((id) => !inUse.has(id));
+    if (pending.length > MAX_PENDING_CLIENTS) {
+      pending.sort((a, b) => this.state.clients[a].createdAt - this.state.clients[b].createdAt);
+      for (const id of pending.slice(0, pending.length - MAX_PENDING_CLIENTS)) delete this.state.clients[id];
     }
     this.save();
     return {
