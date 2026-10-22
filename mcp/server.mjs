@@ -905,7 +905,7 @@ tool(
 const NOT_ALLOWED = "This connection is not allowed to place orders. The user can enable it by connecting again and ticking \"allow this connection to place and pay for orders\" on the approve page (WOLT_ALLOW_ORDERS=1 for a local server). Until then, send them to wolt.com to check out: the venue link opens the saved basket.";
 tool(
   "prepare_order",
-  "Quote the user's basket at one venue for a real order: the exact total Wolt will charge (items, fees, delivery, credits), the saved address it goes to and the saved card it is paid with. Orders nothing; the quote is valid two minutes. Needs login and the ordering permission on this connection. Show the user the total, address and card and ask for an explicit yes before place_order. Lines with options cannot be ordered here yet (send those to wolt.com).",
+  "Quote the user's basket at one venue for a real order: the exact total Wolt will charge (items, fees, delivery, credits), the saved address it goes to and the saved card it is paid with. Orders nothing; the quote is valid two minutes. Needs login and the ordering permission on this connection. Show the user the total, address and card and ask for an explicit yes before place_order. Dishes with options are quoted with their picks; a pick the venue no longer offers is refused.",
   {
     venue_id: z.string().optional().describe("Venue id (24 hex) of the basket to order; defaults to the user's only/first basket"),
     venue_slug: z.string().optional().describe("venueSlug from search results"),
@@ -931,7 +931,7 @@ tool(
 );
 tool(
   "place_order",
-  "Pay for a quoted basket with the user's saved card and place the order with Wolt. Irreversible from here (cancel in the Wolt app). Call only after the user confirmed the exact total from prepare_order in this conversation; pass that quote id and total. Refuses an expired quote, a different total, a line with options, or an amount over the connection's limit.",
+  "Pay for a quoted basket with the user's saved card and place the order with Wolt. Irreversible from here (cancel in the Wolt app). Call only after the user confirmed the exact total from prepare_order in this conversation; pass that quote id and total. Refuses an expired quote, a different total, or an amount over the connection's limit.",
   {
     quote_id: z.string().uuid().describe("quoteId from prepare_order"),
     total: z.number().int().describe("payableAmount from that quote, in minor units — the number the user confirmed")

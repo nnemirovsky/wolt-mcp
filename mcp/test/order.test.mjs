@@ -1,7 +1,7 @@
 // Ordering, offline: Wolt is a stub shaped like a captured card order. Checks
 // the permission gate, the two-phase quote → purchase, every refusal that
 // protects the user's money (total mismatch, cap, expiry, price drift,
-// options, consents, double spend) and the exact purchase payload.
+// unknown option picks, consents, double spend) and the exact purchase payload.
 import assert from "node:assert";
 import { mkdtempSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -38,8 +38,13 @@ setFetchImpl(async (url, init = {}) => {
     items: [{ id: "item1", count: 1, name: "Soup", price: 1200, options: world.options1 }, { id: "item2", count: 2, name: "Noodles", price: 2200, options: [] }] }] });
   if (p.endsWith("/assortment")) return json({ categories: [{ id: CAT, name: "Mains", slug: "mains", items: ["item1", "item2"] }] });
   if (p.endsWith("/assortment/items")) return json({ items: [
-    { id: "item1", name: "Soup Of The Day", price: world.price1, checksum: "cs1", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_percentage: 0 },
-    { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_percentage: 0 }
+    { id: "item1", name: "Soup Of The Day", price: world.price1, checksum: "cs1", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_category_code: "FIN-1", vat_percentage: 14, vat_percentage_decimal: "14.0",
+      options: [{ id: "bind-side", option_id: "def-side", name: "Side", multi_choice_config: { total_range: { min: 1, max: 1 }, free_selections: 0 } },
+                { id: "bind-extra", option_id: "def-extra", name: "Extras", multi_choice_config: { total_range: { min: 0, max: 3 }, free_selections: 1 } }] },
+    { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_category_code: "FIN-1", vat_percentage: 14, vat_percentage_decimal: "14.0", options: [] }
+  ], options: [
+    { id: "def-side", name: "Side", type: "choice", values: [{ id: "v-salad", name: "Salad", price: 0 }, { id: "v-fries", name: "Fries", price: 150 }] },
+    { id: "def-extra", name: "Extras", type: "multi_choice", values: [{ id: "v-cheese", name: "Cheese", price: 100 }, { id: "v-bacon", name: "Bacon", price: 250 }] }
   ] });
   if (p.endsWith("/v2/delivery/info")) return json({ results: [
     { id: "addr1", alias: "Home", label_type: "home", location: { address: "Street 1", city: "Town", user_coordinates: { coordinates: [41.61, 41.63] } } },
@@ -183,14 +188,43 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   await assert.rejects(placeOrder({ quoteId: r.structuredContent.quoteId, total: 5718, now: Date.now() + QUOTE_TTL_MS + 1 }), /expired/);
   assert(!existsSync(join(stateDir, "order-quote.json")), "an expired quote is dropped");
 
-  // Price drift and options are refused at quote time.
+  // Price drift is refused at quote time.
   world.price1 = 1300;
   r = await client.callTool({ name: "prepare_order", arguments: {} });
   assert.match(r.content[0].text, /price of Soup Of The Day changed/);
   world.price1 = 1200;
-  world.options1 = [{ id: "o1", values: [{ id: "v1", count: 1, price: 0 }] }];
+
+  // A dish with options: the basket line carries ids only, the purchase
+  // spells out type, names and prices from the catalog, as the website does.
+  world.options1 = [{ id: "bind-side", values: [{ id: "v-fries", count: 1 }] }, { id: "bind-extra", values: [{ id: "v-cheese", count: 2 }, { id: "v-bacon", count: 1 }] }];
   r = await client.callTool({ name: "prepare_order", arguments: {} });
-  assert.match(r.content[0].text, /lines with options/);
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const withOptions = r.structuredContent;
+  assert.equal(withOptions.items[0].options, "Side: Fries; Extras: 2× Cheese, Bacon");
+  assert.equal(withOptions.items[0].priceWithOptions, 1200 + 150 + 100 + 100, "one extra is free: the dearest pick (Bacon) is dropped, as on the website");
+  const quoteWithOptions = world.calls.filter((c) => c[1].endsWith("/pages/checkout")).at(-1)[2].purchase_plan.menu_items[0];
+  assert.deepEqual(quoteWithOptions.options, [{ id: "bind-side", values: [{ id: "v-fries", count: 1, price: 150 }] }, { id: "bind-extra", values: [{ id: "v-cheese", count: 2, price: 100 }, { id: "v-bacon", count: 1, price: 250 }] }], "the quote carries the catalog's value prices, which the basket page lacks");
+  assert.equal(quoteWithOptions.end_amount, 1550);
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: withOptions.quoteId, total: 5718 } });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const optItem = purchases().at(-1)[2].items[0];
+  assert.deepEqual(optItem.options, [
+    { type: "Choice", id: "bind-side", name: [{ value: "Side", lang: "en" }], values: [{ count: 1, name: [{ value: "Fries", lang: "en" }], price: 150, id: "v-fries" }] },
+    { type: "Multichoice", id: "bind-extra", name: [{ value: "Extras", lang: "en" }], values: [{ count: 2, name: [{ value: "Cheese", lang: "en" }], price: 100, id: "v-cheese" }, { count: 1, name: [{ value: "Bacon", lang: "en" }], price: 250, id: "v-bacon" }] }
+  ], "the captured option shape: binding id, catalog type and names, value prices");
+  assert.equal(optItem.baseprice, 1200, "baseprice stays the unit price");
+  assert.equal(optItem.end_amount, 1550, "end_amount is the unit with its options");
+  assert.equal(optItem.vat_category_code, "FIN-1");
+  assert.equal(optItem.vat_percentage_decimal, "14.0");
+  assert(!("freeSelections" in optItem.options[1]), "the free-pick bookkeeping stays out of the payload");
+
+  // A pick the catalog no longer offers is refused rather than guessed.
+  world.options1 = [{ id: "bind-side", values: [{ id: "v-gone", count: 1 }] }];
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  assert.match(r.content[0].text, /"Side" value is no longer offered/);
+  world.options1 = [{ id: "bind-gone", values: [{ id: "v-fries", count: 1 }] }];
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  assert.match(r.content[0].text, /no longer in the venue's catalog/);
   world.options1 = [];
 
   // Over the cap the quote still shows, with a warning the card carries.

@@ -16,9 +16,11 @@
 //                   client_nonce, so a retry of the same quote cannot buy twice.
 //
 // Only a saved card is supported: Apple Pay, cash and the rest need Wolt's own
-// page. Basket lines with options are refused, because the purchase payload's
-// option shape has not been captured yet and a wrong guess buys the wrong food.
-// Credits and tokens are applied the way the website does (use_credits_and_tokens).
+// page. Dishes with options are ordered the way the website does it: the
+// basket line's option and value ids are joined to the venue's catalog for the
+// type, the names and the prices the purchase payload spells out (captured
+// from a second real order). Credits and tokens are applied the way the
+// website does (use_credits_and_tokens).
 //
 // Whether a caller may order at all is decided outside this module: the
 // `order` OAuth scope ticked on the approve page, or WOLT_ALLOW_ORDERS=1 for
@@ -104,7 +106,47 @@ function pickOne(list, id, what, prefer) {
 async function catalogItems(slug, ids) {
   const r = await woltFetch(`${ASSORTMENT_BASE}${slug}/assortment/items`, { method: "POST", body: { item_ids: ids }, auth: false });
   if (!r.ok || !Array.isArray(r.json?.items)) throw new Error(`could not load the venue's catalog for the order: HTTP ${r.status}`);
-  return new Map(r.json.items.map((it) => [it.id, it]));
+  return {
+    items: new Map(r.json.items.map((it) => [it.id, it])),
+    options: new Map((r.json.options || []).map((o) => [o.id, o]))
+  };
+}
+
+// The purchase payload's option types, as the website maps the catalog's.
+const OPTION_TYPES = { choice: "Choice", multichoice: "Multichoice", multi_choice: "Multichoice", bool: "Bool" };
+
+// A basket line's chosen options in the purchase payload's shape. The line
+// names option groups by the item's binding id and values by id only; the
+// type, the names and the prices come from the catalog (bindings on the item,
+// definitions at the top level), the same join the basket write makes.
+function purchaseOptions(line, it, defs, language) {
+  const label = it.name || line.name || line.id;
+  return (line.options || []).map((sel) => {
+    const binding = (it.options || []).find((b) => b.id === sel.id);
+    const def = binding && defs.get(binding.option_id);
+    if (!def) throw new Error(`${label}: one of its options is no longer in the venue's catalog; re-add the dish and quote again`);
+    const type = OPTION_TYPES[String(def.type || "").toLowerCase()];
+    if (!type) throw new Error(`${label}: option "${def.name}" has a type this server does not know (${def.type}); order on wolt.com`);
+    const values = (sel.values || []).filter((v) => (v.count ?? 1) > 0).map((v) => {
+      const dv = (def.values || []).find((x) => x.id === v.id);
+      if (!dv) throw new Error(`${label}: a chosen "${def.name}" value is no longer offered; re-add the dish and quote again`);
+      return { count: v.count ?? 1, name: [{ value: dv.name || "", lang: language }], price: dv.price || 0, id: v.id };
+    });
+    return { type, id: sel.id, name: [{ value: def.name || binding.name || "", lang: language }], values, freeSelections: binding.multi_choice_config?.free_selections || 0 };
+  });
+}
+
+// What one unit's options add to its price. The website drops the most
+// expensive `free_selections` picks of a group before summing.
+function optionsPrice(options) {
+  return options.reduce((sum, o) => {
+    const prices = o.values.flatMap((v) => Array(v.count).fill(v.price)).sort((a, b) => b - a).slice(o.freeSelections);
+    return sum + prices.reduce((a, b) => a + b, 0);
+  }, 0);
+}
+
+export function optionsText(options) {
+  return (options || []).map((o) => `${o.name[0].value}: ${o.values.map((v) => (v.count > 1 ? `${v.count}× ` : "") + v.name[0].value).join(", ")}`).join("; ");
 }
 
 // Quote the order. Returns the summary the model shows the user; the quote
@@ -112,20 +154,22 @@ async function catalogItems(slug, ids) {
 export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon, tip = 0, comment = "", paymentMethodId = null, addressId = null, language = "en" }) {
   const plan = await loadBasketPlan({ venueId, venueSlug, lat, lon });
   if (!plan.slug) throw new Error("cannot order: the venue's slug is unknown (pass venue_slug)");
-  const withOptions = plan.lines.filter((l) => (l.options || []).length);
-  if (withOptions.length) {
-    throw new Error(`cannot order lines with options yet (${withOptions.map((l) => l.name || l.id).join(", ")}); order this basket on wolt.com`);
-  }
   const address = pickOne(await savedAddresses(), addressId, "address", (a) => a.labelType === "home");
   const card = pickOne(await savedCards(), paymentMethodId, "card", (c) => c.isDefault);
   const catalog = await catalogItems(plan.slug, plan.lines.map((l) => l.id));
 
   const items = plan.lines.map((line, i) => {
-    const it = catalog.get(line.id);
+    const it = catalog.items.get(line.id);
     if (!it) throw new Error(`${line.name || line.id} is no longer in the venue's catalog; remove it from the basket`);
     if (it.disabled_info) throw new Error(`${it.name || line.id} is currently unavailable; remove it from the basket`);
     const count = line.count > 0 ? line.count : 1;
     if (it.price !== line.price) throw new Error(`the price of ${it.name || line.id} changed since it was added (${line.price} -> ${it.price}); re-add it and quote again`);
+    const options = purchaseOptions(line, it, catalog.options, language);
+    const unit = it.price + optionsPrice(options);
+    // The quote prices the same picks: the basket page carries no value
+    // prices, so they are filled in from the catalog here.
+    plan.menuItems[i].options = options.map((o) => ({ id: o.id, values: o.values.map((v) => ({ id: v.id, count: v.count, price: v.price })) }));
+    plan.menuItems[i].end_amount = unit * count;
     return {
       id: line.id,
       configIndex: i,
@@ -138,11 +182,13 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
       from_recommendation: false,
       alcohol_percentage: (it.alcohol_permille || 0) / 10,
       product_hierarchy_tags: it.product_hierarchy_tags || [],
+      vat_category_code: it.vat_category_code ?? null,
       vat_percentage: it.vat_percentage || 0,
+      vat_percentage_decimal: it.vat_percentage_decimal ?? String(it.vat_percentage || 0),
       baseprice: it.price,
-      end_amount: it.price * count,
+      end_amount: unit * count,
       restrictions: it.restrictions || [],
-      options: [],
+      options: options.map(({ freeSelections, ...o }) => o),
       checksum: it.checksum
     };
   });
@@ -202,7 +248,7 @@ export function summarize(quote) {
     quoteId: quote.id,
     expiresInSeconds: Math.max(0, Math.round((quote.expiresAt - Date.now()) / 1000)),
     venue: quote.venue.name || quote.venue.slug,
-    items: quote.items.map((it) => ({ name: it.name[0].value, count: it.count, price: it.baseprice })),
+    items: quote.items.map((it) => ({ name: it.name[0].value, count: it.count, price: it.baseprice, ...(it.options.length ? { options: optionsText(it.options), priceWithOptions: it.end_amount / it.count } : {}) })),
     rows: quote.rows,
     payableAmount: quote.endAmount,
     currency: quote.venue.currency,
