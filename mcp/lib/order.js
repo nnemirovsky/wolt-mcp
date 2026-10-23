@@ -103,8 +103,10 @@ function pickOne(list, id, what, prefer) {
 // Fresh catalog records for the basket's items: the purchase call echoes each
 // item's checksum and current price, so a line whose price moved since it was
 // added is refused rather than charged at a number the user never saw.
-async function catalogItems(slug, ids) {
-  const r = await woltFetch(`${ASSORTMENT_BASE}${slug}/assortment/items`, { method: "POST", body: { item_ids: ids }, auth: false });
+async function catalogItems(slug, ids, language) {
+  // Without ?language the catalog answers in the venue's own language, and the
+  // purchase would carry those names tagged with the user's.
+  const r = await woltFetch(`${ASSORTMENT_BASE}${slug}/assortment/items?language=${encodeURIComponent(language)}`, { method: "POST", body: { item_ids: ids }, auth: false });
   if (!r.ok || !Array.isArray(r.json?.items)) throw new Error(`could not load the venue's catalog for the order: HTTP ${r.status}`);
   return {
     items: new Map(r.json.items.map((it) => [it.id, it])),
@@ -136,6 +138,14 @@ function purchaseOptions(line, it, defs, language) {
   });
 }
 
+// The lowest recent price the website echoes for a discounted item; the
+// catalog has carried it both as a number and as { price }.
+function lowestPrice(it) {
+  const v = it.lowest_price ?? it.lowest_price_v2;
+  const n = typeof v === "number" ? v : v?.price;
+  return typeof n === "number" ? n : null;
+}
+
 // What one unit's options add to its price. The website drops the most
 // expensive `free_selections` picks of a group before summing.
 function optionsPrice(options) {
@@ -156,13 +166,14 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
   if (!plan.slug) throw new Error("cannot order: the venue's slug is unknown (pass venue_slug)");
   const address = pickOne(await savedAddresses(), addressId, "address", (a) => a.labelType === "home");
   const card = pickOne(await savedCards(), paymentMethodId, "card", (c) => c.isDefault);
-  const catalog = await catalogItems(plan.slug, plan.lines.map((l) => l.id));
+  const catalog = await catalogItems(plan.slug, plan.lines.map((l) => l.id), language);
 
   const items = plan.lines.map((line, i) => {
     const it = catalog.items.get(line.id);
     if (!it) throw new Error(`${line.name || line.id} is no longer in the venue's catalog; remove it from the basket`);
     if (it.disabled_info) throw new Error(`${it.name || line.id} is currently unavailable; remove it from the basket`);
     const count = line.count > 0 ? line.count : 1;
+    if (line.weighted_item_info || it.sell_by_weight_config) throw new Error(`${it.name || line.id} is sold by weight, which this server does not order yet; order on wolt.com`);
     if (it.price !== line.price) throw new Error(`the price of ${it.name || line.id} changed since it was added (${line.price} -> ${it.price}); re-add it and quote again`);
     const options = purchaseOptions(line, it, catalog.options, language);
     const unit = it.price + optionsPrice(options);
@@ -190,8 +201,10 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
       baseprice: it.price,
       end_amount: unit * count,
       restrictions: it.restrictions || [],
+      ...(lowestPrice(it) != null ? { lowest_price: lowestPrice(it) } : {}),
       options: options.map(({ freeSelections, ...o }) => o),
-      checksum: it.checksum
+      checksum: it.checksum,
+      ...(line.substitution_settings ? { substitution_settings: line.substitution_settings } : {})
     };
   });
   if (items.some((it) => !it.checksum)) throw new Error("the catalog returned no checksum for an item; cannot build the purchase");
@@ -313,6 +326,12 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
     payment_links: { return_url: `https://wolt.com/${quote.language}` }, // only redirect payments use it; a saved card never redirects
     delivery_info: { id: { $oid: quote.address.id }, use_last_100m_address_picker: true },
     delivery_price: quote.deliveryPrice,
+    // The website echoes these from the quote's validation block when set; the
+    // purchase recomputes the total, and a basket with a bag fee that does not
+    // say so fails with "Purchase validation error".
+    ...(v.bag_fee != null ? { bag_fee: v.bag_fee } : {}),
+    ...(v.credits_amount != null ? { credits_amount: v.credits_amount } : {}),
+    ...(v.end_amount_rounding != null ? { end_amount_rounding: v.end_amount_rounding } : {}),
     additional_checkout_options: { no_contact_delivery: false },
     discounts: v.discounts || [],
     offers: v.offers || [],

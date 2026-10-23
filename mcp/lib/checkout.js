@@ -89,6 +89,22 @@ export async function loadBasketPlan({ venueId, venueSlug = null, lat, lon, coun
     warnings.push("no venue slug available — category mapping limited to per-item lookups");
   }
 
+  // Big venues (the grocery markets) list categories without their items, so
+  // the assortment index misses them. The item records call the website uses
+  // returns each item's categories alongside; ask it for whatever is left.
+  const itemCategories = new Map();
+  const unresolved = (basket.items || []).map((l) => l.id).filter((id) => id && !categoryIndex.has(id));
+  if (slug && unresolved.length) {
+    const recs = await tryFetchJson(`${ASSORTMENT_BASE}${slug}/assortment/items`, { method: "POST", body: { item_ids: unresolved }, auth: false });
+    for (const c of recs?.categories || []) {
+      for (const id of c.item_ids || []) {
+        if (!itemCategories.has(id)) itemCategories.set(id, []);
+        itemCategories.get(id).push(c.id);
+      }
+    }
+    for (const [id, cats] of itemCategories) if (!categoryIndex.has(id)) categoryIndex.set(id, cats[0]);
+  }
+
   const menuItems = [];
   for (const line of basket.items || []) {
     const count = line.count > 0 ? line.count : 1;
@@ -111,7 +127,7 @@ export async function loadBasketPlan({ venueId, venueSlug = null, lat, lon, coun
       end_amount: count * price,
       is_weighted_item: !!line.weighted_item_info,
       category_id: categoryId,
-      category_ids: [categoryId],
+      category_ids: itemCategories.get(line.id) || [categoryId],
       alcohol_permille: line.alcohol_permille || 0,
       exclude_from_credits: !!line.exclude_from_credits,
       exclude_from_discounts: !!line.exclude_from_discounts,

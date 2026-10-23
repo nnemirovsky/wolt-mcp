@@ -24,7 +24,7 @@ setLocation({ lat: 41.6, lon: 41.6, label: "test" });
 const VENUE = "67d1487ce8ee162ad6471b06";
 const CAT = "a858788a7098ec1de13a9c7f";
 const world = {
-  price1: 1200, options1: [], consents: [], purchaseStatus: 200,
+  price1: 1200, options1: [], consents: [], purchaseStatus: 200, bagFee: null, bigVenue: false, weighted2: null,
   calls: [] // [method, path, body]
 };
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
@@ -32,17 +32,19 @@ setFetchImpl(async (url, init = {}) => {
   const u = new URL(String(url));
   const method = init.method || "GET";
   const body = init.body ? JSON.parse(init.body) : null;
-  world.calls.push([method, u.pathname, body]);
+  world.calls.push([method, u.pathname, body, u.search]);
   const p = u.pathname;
   if (p.endsWith("/pages/baskets")) return json({ baskets: [{ id: "b1", currency: "EUR", venue: { id: VENUE, slug: "soup-place", name: "Soup Place", currency: "EUR", country: "FIN" },
-    items: [{ id: "item1", count: 1, name: "Soup", price: 1200, options: world.options1 }, { id: "item2", count: 2, name: "Noodles", price: 2200, options: [] }] }] });
-  if (p.endsWith("/assortment")) return json({ categories: [{ id: CAT, name: "Mains", slug: "mains", items: ["item1", "item2"] }] });
+    items: [{ id: "item1", count: 1, name: "Soup", price: 1200, options: world.options1 }, { id: "item2", count: 2, name: "Noodles", price: 2200, options: [], ...(world.weighted2 ? { weighted_item_info: world.weighted2 } : {}) }] }] });
+  // A grocery market lists its categories without their items; the item
+  // records call names them instead.
+  if (p.endsWith("/assortment")) return json({ categories: world.bigVenue ? [{ id: CAT, name: "Mains", slug: "mains" }] : [{ id: CAT, name: "Mains", slug: "mains", items: ["item1", "item2"] }] });
   if (p.endsWith("/assortment/items")) return json({ items: [
     { id: "item1", name: "Soup Of The Day", price: world.price1, checksum: "cs1", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_category_code: "FIN-1", vat_percentage: 14, vat_percentage_decimal: "14.0",
       options: [{ id: "bind-side", option_id: "def-side", name: "Side", multi_choice_config: { total_range: { min: 1, max: 1 }, free_selections: 0 } },
                 { id: "bind-extra", option_id: "def-extra", name: "Extras", multi_choice_config: { total_range: { min: 0, max: 3 }, free_selections: 1 } }] },
     { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], options: [] }
-  ], options: [
+  ], categories: [{ id: "cat-a", name: null, item_ids: ["item1"] }, { id: "cat-b", name: null, item_ids: ["item1", "item2"] }], options: [
     { id: "def-side", name: "Side", type: "choice", values: [{ id: "v-salad", name: "Salad", price: 0 }, { id: "v-fries", name: "Fries", price: 150 }] },
     { id: "def-extra", name: "Extras", type: "multi_choice", values: [{ id: "v-cheese", name: "Cheese", price: 100 }, { id: "v-bacon", name: "Bacon", price: 250 }] }
   ] });
@@ -55,7 +57,7 @@ setFetchImpl(async (url, init = {}) => {
     { id: { $uuid: "card2" }, type: "card", nickname: "Old", method_title: "411111******1111", method_code: "visa", is_default: false, valid_for_payments: false }
   ], invoices: [] });
   if (p.endsWith("/pages/checkout")) return json({ id: "chk1", payable_amount: 5718,
-    purchase_validation: { end_amount: 5718, delivery_price: 118, credits_amount: null, use_token: null, discounts: [], surcharges: [], offers: [] },
+    purchase_validation: { end_amount: 5718, delivery_price: 118, bag_fee: world.bagFee, credits_amount: null, use_token: null, discounts: [], surcharges: [], offers: [] },
     checkout_rows: [{ template: "amount_row", label: "Item subtotal", amount: { amount: 5600, formatted_amount: "EUR56.00" } }, { template: "price_total_amount_row", label: "Total", price_total_amount: { amount: 5718, formatted_amount: "EUR57.18" } }],
     delivery_configs: [{ method: "homedelivery", schedule: "standard", estimate: { label: "50-60 min" } }],
     payment_breakdown: { unallocated: { amount: 0 } } });
@@ -147,6 +149,8 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(body.checkout_id, "chk1");
   assert.equal(body.end_amount, 5718);
   assert.equal(body.delivery_price, 118);
+  assert(!("bag_fee" in body) && !("credits_amount" in body), "fees the quote did not set are left out, as on the website");
+  assert.match(world.calls.filter((c) => c[1].endsWith("/assortment/items")).at(-1)[3], /language=en/, "catalog names come in the order's language");
   assert.equal(body.payment_method_id, "card1");
   assert.equal(body.payment_method_type, "card");
   assert.deepEqual(body.delivery_info, { id: { $oid: "addr1" }, use_last_100m_address_picker: true });
@@ -154,7 +158,7 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(body.type, "purchase");
   assert.equal(body.currency, "EUR");
   assert.equal(body.venue_id, VENUE);
-  assert.deepEqual(body.price_shadowing, { end_amount: 5718, delivery_price: 118, credits_amount: null, use_token: null, discounts: [], surcharges: [], offers: [] });
+  assert.deepEqual(body.price_shadowing, { end_amount: 5718, delivery_price: 118, bag_fee: null, credits_amount: null, use_token: null, discounts: [], surcharges: [], offers: [] });
   assert.equal(body.items.length, 2);
   assert.deepEqual(body.items[0].name, [{ value: "Soup Of The Day", lang: "en" }]);
   assert.equal(body.items[0].checksum, "cs1");
@@ -239,6 +243,26 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   r = await client.callTool({ name: "prepare_order", arguments: {} });
   assert.match(r.content[0].text, /no longer in the venue's catalog/);
   world.options1 = [];
+
+  // A grocery basket: the bag fee is echoed to the purchase, and categories
+  // the assortment does not list come from the item records.
+  world.bagFee = 40; world.bigVenue = true;
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  const grocery = world.calls.filter((c) => c[1].endsWith("/pages/checkout")).at(-1)[2].purchase_plan.menu_items;
+  assert.equal(grocery[0].category_id, "cat-a");
+  assert.deepEqual(grocery[0].category_ids, ["cat-a", "cat-b"]);
+  assert.equal(grocery[1].category_id, "cat-b");
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 5718 } });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.equal(purchases().at(-1)[2].bag_fee, 40, "a basket with a bag fee says so, or Wolt answers \"Purchase validation error\"");
+  world.bagFee = null; world.bigVenue = false;
+
+  // Lines sold by weight are refused until their payload is known.
+  world.weighted2 = { count: 1, purchased_weight_in_grams: 500, weighted_item_input_type: "grams" };
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  assert.match(r.content[0].text, /sold by weight/);
+  world.weighted2 = null;
 
   // Over the cap the quote still shows, with a warning the card carries.
   await close();
