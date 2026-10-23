@@ -41,7 +41,7 @@ setFetchImpl(async (url, init = {}) => {
     { id: "item1", name: "Soup Of The Day", price: world.price1, checksum: "cs1", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_category_code: "FIN-1", vat_percentage: 14, vat_percentage_decimal: "14.0",
       options: [{ id: "bind-side", option_id: "def-side", name: "Side", multi_choice_config: { total_range: { min: 1, max: 1 }, free_selections: 0 } },
                 { id: "bind-extra", option_id: "def-extra", name: "Extras", multi_choice_config: { total_range: { min: 0, max: 3 }, free_selections: 1 } }] },
-    { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_category_code: "FIN-1", vat_percentage: 14, vat_percentage_decimal: "14.0", options: [] }
+    { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], options: [] }
   ], options: [
     { id: "def-side", name: "Side", type: "choice", values: [{ id: "v-salad", name: "Salad", price: 0 }, { id: "v-fries", name: "Fries", price: 150 }] },
     { id: "def-extra", name: "Extras", type: "multi_choice", values: [{ id: "v-cheese", name: "Cheese", price: 100 }, { id: "v-bacon", name: "Bacon", price: 250 }] }
@@ -59,7 +59,12 @@ setFetchImpl(async (url, init = {}) => {
     checkout_rows: [{ template: "amount_row", label: "Item subtotal", amount: { amount: 5600, formatted_amount: "EUR56.00" } }, { template: "price_total_amount_row", label: "Total", price_total_amount: { amount: 5718, formatted_amount: "EUR57.18" } }],
     delivery_configs: [{ method: "homedelivery", schedule: "standard", estimate: { label: "50-60 min" } }],
     payment_breakdown: { unallocated: { amount: 0 } } });
-  if (p.endsWith("/post-checkout-config")) return json({ required_consents: world.consents });
+  if (p.endsWith("/post-checkout-config")) {
+    // Wolt answers a spelled-out option value list here with 313.
+    const listed = body.basket.some((it) => it.options.some((o) => Array.isArray(o.values)));
+    if (listed) return json({ error_code: 313, msg: "Invalid parameters" }, 400);
+    return json({ required_consents: world.consents });
+  }
   if (p.endsWith("/v2/purchases")) return world.purchaseStatus === 200
     ? json({ results: { id: { $oid: "order1" }, status: "received", amount: 5718, client_pre_estimate: "50-60", currency: "EUR" } })
     : new Response("payment declined", { status: world.purchaseStatus });
@@ -217,6 +222,14 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(optItem.vat_category_code, "FIN-1");
   assert.equal(optItem.vat_percentage_decimal, "14.0");
   assert(!("freeSelections" in optItem.options[1]), "the free-pick bookkeeping stays out of the payload");
+  const optCfg = world.calls.filter((c) => c[1].endsWith("/post-checkout-config")).at(-1)[2].basket[0];
+  assert.deepEqual(optCfg.options, [
+    { type: "Choice", id: "bind-side", name: [{ value: "Side", lang: "en" }], values: { "v-fries": 1 } },
+    { type: "Multichoice", id: "bind-extra", name: [{ value: "Extras", lang: "en" }], values: { "v-cheese": 2, "v-bacon": 1 } }
+  ], "the consent check gets option values as an id-to-count map, as the website sends them");
+  const plainItem = purchases().at(-1)[2].items[1];
+  assert(!("vat_category_code" in plainItem) && !("vat_percentage_decimal" in plainItem), "an item without VAT data omits the code and the decimal, as the website does");
+  assert.equal(plainItem.vat_percentage, 0);
 
   // A pick the catalog no longer offers is refused rather than guessed.
   world.options1 = [{ id: "bind-side", values: [{ id: "v-gone", count: 1 }] }];

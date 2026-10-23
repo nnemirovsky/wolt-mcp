@@ -182,9 +182,11 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
       from_recommendation: false,
       alcohol_percentage: (it.alcohol_permille || 0) / 10,
       product_hierarchy_tags: it.product_hierarchy_tags || [],
-      vat_category_code: it.vat_category_code ?? null,
+      // The website sends the code and the decimal only when the catalog has
+      // them; items without VAT data go out with the bare percentage.
+      ...(it.vat_category_code != null ? { vat_category_code: it.vat_category_code } : {}),
       vat_percentage: it.vat_percentage || 0,
-      vat_percentage_decimal: it.vat_percentage_decimal ?? String(it.vat_percentage || 0),
+      ...(it.vat_percentage_decimal != null ? { vat_percentage_decimal: it.vat_percentage_decimal } : {}),
       baseprice: it.price,
       end_amount: unit * count,
       restrictions: it.restrictions || [],
@@ -261,6 +263,14 @@ export function summarize(quote) {
   };
 }
 
+// The consent check takes the purchase items with one difference the website
+// makes: an option's values are a map of value id to count, not the spelled-out
+// list the purchase carries. The list form is refused with "313 Invalid
+// parameters".
+function consentBasket(items) {
+  return items.map((it) => ({ ...it, options: it.options.map((o) => ({ type: o.type, id: o.id, name: o.name, values: Object.fromEntries(o.values.map((v) => [v.id, v.count])) })) }));
+}
+
 // Pay. `total` is the minor-units total the user confirmed; `cap` an optional
 // per-order ceiling in minor units from the grant.
 export async function placeOrder({ quoteId, total, cap = null, now = Date.now() }) {
@@ -271,8 +281,8 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
   if (total !== quote.endAmount) throw new Error(`the total you passed (${total}) is not the quoted ${quote.endAmount} ${quote.venue.currency}; show the user the quote and pass its payableAmount`);
   if (cap != null && quote.endAmount > cap) throw new Error(`this order (${minorToText(quote.endAmount, quote.venue.currency)}) is over the per-order limit set when this connection was approved (${minorToText(cap, quote.venue.currency)})`);
 
-  const cfg = await woltFetch(POST_CHECKOUT_CONFIG_URL, { method: "POST", body: { venue_id: quote.venue.id, country: quote.venue.country, basket: quote.items } });
-  if (!cfg.ok) throw new Error(`post-checkout-config failed: HTTP ${cfg.status} ${cfg.text.slice(0, 200)}`);
+  const cfg = await woltFetch(POST_CHECKOUT_CONFIG_URL, { method: "POST", body: { venue_id: quote.venue.id, country: quote.venue.country, basket: consentBasket(quote.items) } });
+  if (!cfg.ok) throw new Error(`the pre-payment check failed, nothing was charged: HTTP ${cfg.status} ${cfg.text.slice(0, 200)}`);
   const consents = cfg.json?.required_consents || [];
   if (consents.length) throw new Error(`Wolt wants the user to accept something before this order (${consents.map((c) => c.id || c.type || JSON.stringify(c)).join(", ")}); order on wolt.com once`);
 
