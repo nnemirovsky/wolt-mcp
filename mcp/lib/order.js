@@ -289,6 +289,7 @@ function consentBasket(items) {
 export async function placeOrder({ quoteId, total, cap = null, now = Date.now() }) {
   const quote = readQuote();
   if (!quote || quote.id !== quoteId) throw new Error("that quote is unknown or was replaced; call prepare_order again");
+  if (quote.declined) throw new Error("the card was declined for this quote; do not retry from here, the user should pay in the Wolt app or with another card");
   if (quote.orderId) throw new Error(`this quote was already paid (order ${quote.orderId}); prepare a new one for another order`);
   if (now > quote.expiresAt) { dropQuote(); throw new Error("the quote expired (two minutes); call prepare_order again and re-confirm the total with the user"); }
   if (total !== quote.endAmount) throw new Error(`the total you passed (${total}) is not the quoted ${quote.endAmount} ${quote.venue.currency}; show the user the quote and pass its payableAmount`);
@@ -351,6 +352,14 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
   if (!r.ok) {
     quote.lastError = `HTTP ${r.status} ${r.text.slice(0, 300)}`;
     writeQuote(quote);
+    // error_code 800 "Failed to process card" is the card's authorization
+    // being declined (Adyen, then the bank). Wolt records it as a failed order
+    // and nothing is held; another try only adds another failed order.
+    if (r.json?.error_code === 800 || /process card/i.test(r.json?.msg || "")) {
+      quote.declined = true;
+      writeQuote(quote);
+      throw new Error(`The card was declined (Wolt: "${r.json?.msg || "Failed to process card"}"). Nothing was charged; Wolt lists the attempt as a failed order. Do not retry from here: tell the user to check their bank app for a declined or blocked payment, then pay in the Wolt app, where the bank can ask for confirmation, or with another card.`);
+    }
     throw new Error(`Wolt refused the purchase: ${quote.lastError}. The same quote can be retried once if this looks transient; otherwise order on wolt.com`);
   }
   const res = r.json?.results || r.json || {};
