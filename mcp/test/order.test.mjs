@@ -67,6 +67,7 @@ setFetchImpl(async (url, init = {}) => {
     if (listed) return json({ error_code: 313, msg: "Invalid parameters" }, 400);
     return json({ required_consents: world.consents });
   }
+  if (p.endsWith("/v2/purchases") && world.purchaseStatus === 800) return json({ msg: "Failed to process card", status: "ERR", error_code: 800, params: null }, 400);
   if (p.endsWith("/v2/purchases")) return world.purchaseStatus === 200
     ? json({ results: { id: { $oid: "order1" }, status: "received", amount: 5718, client_pre_estimate: "50-60", currency: "EUR" } })
     : new Response("payment declined", { status: world.purchaseStatus });
@@ -190,6 +191,18 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(declined.consumer_comment, "ring twice");
   assert.deepEqual(declined.delivery_info.id, { $oid: "addr2" });
   assert.equal(readQuote().orderId, undefined, "a refused purchase leaves the quote unspent");
+  world.purchaseStatus = 200;
+
+  // A card decline says so and blocks retrying the same quote.
+  world.purchaseStatus = 800;
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  const qd = r.structuredContent;
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
+  assert.match(r.content[0].text, /card was declined.*Nothing was charged.*Do not retry/s);
+  const sent = purchases().length;
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
+  assert.match(r.content[0].text, /declined for this quote/);
+  assert.equal(purchases().length, sent, "a declined quote is not sent again");
   world.purchaseStatus = 200;
 
   // Expiry.
