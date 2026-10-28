@@ -31,6 +31,7 @@ import { join } from "node:path";
 import { woltFetch } from "./http.js";
 import { CHECKOUT_URL, loadBasketPlan, checkoutRows } from "./checkout.js";
 import { currentStateDir } from "./context.js";
+import { getVenue } from "./venue.js";
 
 const DELIVERY_INFO_URL = "https://restaurant-api.wolt.com/v2/delivery/info";
 const PAYMENT_METHODS_URL = "https://restaurant-api.wolt.com/v3/user/me/payment_methods";
@@ -358,7 +359,11 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
     if (r.json?.error_code === 800 || /process card/i.test(r.json?.msg || "")) {
       quote.declined = true;
       writeQuote(quote);
-      throw new Error(`The card was declined (Wolt: "${r.json?.msg || "Failed to process card"}"). Nothing was charged; Wolt lists the attempt as a failed order. Do not retry from here: tell the user to check their bank app for a declined or blocked payment, then pay in the Wolt app, where the bank can ask for confirmation, or with another card.`);
+      // The basket survives a decline; the venue's own link opens it in the
+      // Wolt app ("Continue order?"), where the payment usually goes through.
+      let link = null;
+      try { link = (await getVenue(quote.venue.slug)).shareUrl || null; } catch (e) { /* the message still stands without it */ }
+      throw new Error(`The card was declined (Wolt: "${r.json?.msg || "Failed to process card"}"). Nothing was charged; Wolt lists the attempt as a failed order. Do not retry from here: the payment was stopped by Wolt's payment checks, which a server-side order can trip where the Wolt app does not. The basket is still there; give the user ${link ? `this link, which opens it in the Wolt app: ${link}` : "the Wolt app"} to pay there, or another card.`);
     }
     throw new Error(`Wolt refused the purchase: ${quote.lastError}. The same quote can be retried once if this looks transient; otherwise order on wolt.com`);
   }
