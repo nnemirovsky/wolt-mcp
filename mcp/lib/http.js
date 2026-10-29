@@ -62,7 +62,7 @@ function retryAfterMs(res) {
 // serves to everyone but personalises for a logged-in user (the front page,
 // venue search).
 // retry429Ms is injectable so tests don't sleep through real backoffs.
-export async function woltFetch(url, { method = "GET", body = null, lang = "en", auth = true, fetchImpl = null, retry429Ms = RETRY_429_MS } = {}) {
+export async function woltFetch(url, { method = "GET", body = null, lang = "en", auth = true, fetchImpl = null, retry429Ms = RETRY_429_MS, retry = true } = {}) {
   const impl = fetchImpl || injectedFetch || fetch;
   const doFetch = async (token) => {
     await acquire();
@@ -81,7 +81,7 @@ export async function woltFetch(url, { method = "GET", body = null, lang = "en",
   else if (optional) { try { token = await getAccessToken(); } catch (e) { token = null; } }
   let res = await doFetch(token);
 
-  if (token && res.status === 401) {
+  if (retry && token && res.status === 401) {
     if (optional) {
       // A stale optional token is not worth failing over: refresh if we can,
       // otherwise serve the public version of the page.
@@ -96,7 +96,7 @@ export async function woltFetch(url, { method = "GET", body = null, lang = "en",
   // the default ladder. Past that, the honest failure beats silent waiting.
   let honoredRetryAfter = false;
   let attempt429 = 0;
-  while (res.status === 429 || res.status >= 500) {
+  while (retry && (res.status === 429 || res.status >= 500)) {
     const ra = retryAfterMs(res);
     let wait = null;
     if (ra != null && !honoredRetryAfter) { wait = ra; honoredRetryAfter = true; }

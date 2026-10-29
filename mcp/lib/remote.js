@@ -30,6 +30,7 @@ import { OAuthProvider, OAuthError, newAccountId } from "./oauth.js";
 import { setRemoteMode, validateRefreshToken, adoptTokens } from "./auth.js";
 import { withStateDir, accountStateDir } from "./context.js";
 import { orderingFromEnv } from "./order.js";
+import { PaymentContextService, paymentPage, paymentSdk } from "./payment-context.js";
 
 const DEFAULT_STATIC_REDIRECTS = [
   "https://chatgpt.com/connector_platform_oauth_redirect",
@@ -101,6 +102,7 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     ? new OAuthProvider({ issuer: cfg.publicUrl, resource: `${cfg.publicUrl}/mcp`, stateDir: cfg.stateDir, guard: cfg.guard, staticClient: cfg.staticClient, fetchImpl })
     : null;
   const failures = new Map(); // ip → { count, resetAt }
+  const paymentContext = new PaymentContextService({ stateDir: cfg.stateDir, publicUrl: cfg.publicUrl, publicKey: env.WOLT_RAVELIN_PUBLIC_KEY || null, fetchImpl });
 
   const server = createServer((req, res) => {
     const started = Date.now();
@@ -115,6 +117,27 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
   });
 
   async function handle(req, res, path) {
+    if (path === "/payment-context" || path.startsWith("/payment-context/")) {
+      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Referrer-Policy", "no-referrer");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      if (path === "/payment-context" && req.method === "GET") {
+        res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' https://*.ravelin.click; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end(paymentPage());
+      }
+      if (path === "/payment-context/sdk.js" && req.method === "GET") { res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" }); return res.end(paymentSdk()); }
+      if (path === "/payment-context/config" && req.method === "GET") {
+        try { return sendJson(res, 200, await paymentContext.config()); }
+        catch (e) { return sendJson(res, 503, { error: e.message }); }
+      }
+      if (path === "/payment-context" && req.method === "POST") {
+        if (req.headers.origin !== cfg.publicUrl || !/^application\/json\b/i.test(req.headers["content-type"] || "")) return sendJson(res, 403, { error: "same-origin browser request required" });
+        try { return sendJson(res, 200, paymentContext.complete(await readBody(req))); }
+        catch (e) { return sendJson(res, 400, { error: e.message }); }
+      }
+      return sendJson(res, 405, { error: "method_not_allowed" });
+    }
     cors(res);
     if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
     const url = new URL(req.url || "/", cfg.publicUrl || `http://${req.headers.host || "localhost"}`);
@@ -194,6 +217,7 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     // approve page (scope "order" and the cap); fixed API tokens and the
     // no-auth mode fall back to the operator's environment.
     const ordering = grant ? { allowed: /\border\b/.test(grant.scope || ""), cap: grant.orderCap ?? null } : orderingFromEnv(env);
+    if (cfg.publicUrl) ordering.paymentSetup = (quote) => paymentContext.issue(quote);
     await withStateDir(stateDir, async () => {
       const mcpServer = buildServer({ remote: true, ordering });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

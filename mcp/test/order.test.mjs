@@ -15,7 +15,7 @@ const { buildServer } = await import("../server.mjs");
 const { setFetchImpl } = await import("../lib/http.js");
 const { setTokens } = await import("../lib/auth.js");
 const { setLocation } = await import("../lib/config.js");
-const { placeOrder, readQuote, orderingFromEnv, QUOTE_TTL_MS } = await import("../lib/order.js");
+const { placeOrder, readQuote, orderingFromEnv, QUOTE_TTL_MS, attachPaymentContext } = await import("../lib/order.js");
 
 const b64url = (s) => Buffer.from(s).toString("base64url");
 setTokens({ accessToken: `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))}.sig`, refreshToken: "r" });
@@ -25,6 +25,7 @@ const VENUE = "67d1487ce8ee162ad6471b06";
 const CAT = "a858788a7098ec1de13a9c7f";
 const world = {
   price1: 1200, options1: [], consents: [], purchaseStatus: 200, bagFee: null, bigVenue: false, weighted2: null,
+  weightConfig: null, originalPrice: null, purchaseResult: null, quoteAmount: 5718, addOnExpiresAt: Date.now() + 1200000, addOnAddress: "addr1", addOnVenue: VENUE,
   calls: [] // [method, path, body]
 };
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
@@ -43,7 +44,7 @@ setFetchImpl(async (url, init = {}) => {
     { id: "item1", name: "Soup Of The Day", price: world.price1, checksum: "cs1", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], vat_category_code: "FIN-1", vat_percentage: 14, vat_percentage_decimal: "14.0",
       options: [{ id: "bind-side", option_id: "def-side", name: "Side", multi_choice_config: { total_range: { min: 1, max: 1 }, free_selections: 0 } },
                 { id: "bind-extra", option_id: "def-extra", name: "Extras", multi_choice_config: { total_range: { min: 0, max: 3 }, free_selections: 1 } }] },
-    { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], options: [] }
+    { id: "item2", name: "Noodles Of The Day", price: 2200, checksum: "cs2", alcohol_permille: 0, product_hierarchy_tags: [], restrictions: [], options: [], sell_by_weight_config: world.weightConfig, original_price: world.originalPrice }
   ], categories: [{ id: "cat-a", name: null, item_ids: ["item1"] }, { id: "cat-b", name: null, item_ids: ["item1", "item2"] }], options: [
     { id: "def-side", name: "Side", type: "choice", values: [{ id: "v-salad", name: "Salad", price: 0 }, { id: "v-fries", name: "Fries", price: 150 }] },
     { id: "def-extra", name: "Extras", type: "multi_choice", values: [{ id: "v-cheese", name: "Cheese", price: 100 }, { id: "v-bacon", name: "Bacon", price: 250 }] }
@@ -56,8 +57,9 @@ setFetchImpl(async (url, init = {}) => {
     { id: { $uuid: "card1" }, type: "card", nickname: "Visa", method_title: "431571******8543", method_code: "visa", is_default: true, valid_for_payments: true },
     { id: { $uuid: "card2" }, type: "card", nickname: "Old", method_title: "411111******1111", method_code: "visa", is_default: false, valid_for_payments: false }
   ], invoices: [] });
-  if (p.endsWith("/pages/checkout")) return json({ id: "chk1", payable_amount: 5718,
-    purchase_validation: { end_amount: 5718, delivery_price: 118, bag_fee: world.bagFee, credits_amount: null, use_token: null, discounts: [], surcharges: [], offers: [] },
+  if (p.includes("/multi-venue-ordering/")) return json({ expiry: { expiry_timestamp: Math.floor(world.addOnExpiresAt / 1000) }, purchase_context: { delivery_drop_off_id: world.addOnAddress, venue_id: "parent-venue", is_ncd: true }, venues: [{ id: world.addOnVenue, name: "Soup Place", slug: "soup-place" }], banner: { title: "Add more" }, bottom_sheet: { sections: [{ body: "No added delivery fee; service fee may apply." }], footer: "Orders may arrive separately." } });
+  if (p.endsWith("/pages/checkout")) return json({ id: "chk1", payable_amount: world.quoteAmount,
+    purchase_validation: { end_amount: world.quoteAmount, delivery_price: 118, bag_fee: world.bagFee, credits_amount: null, use_token: null, discounts: [], surcharges: [], offers: [] },
     checkout_rows: [{ template: "amount_row", label: "Item subtotal", amount: { amount: 5600, formatted_amount: "EUR56.00" } }, { template: "price_total_amount_row", label: "Total", price_total_amount: { amount: 5718, formatted_amount: "EUR57.18" } }],
     delivery_configs: [{ method: "homedelivery", schedule: "standard", estimate: { label: "50-60 min" } }],
     payment_breakdown: { unallocated: { amount: 0 } } });
@@ -69,8 +71,10 @@ setFetchImpl(async (url, init = {}) => {
   }
   if (p.endsWith("/soup-place/static")) return json({ venue: { id: VENUE, name: "Soup Place", share_url: "https://wolt.com/en/fin/town/restaurant/soup-place" } });
   if (p.endsWith("/v2/purchases") && world.purchaseStatus === 800) return json({ msg: "Failed to process card", status: "ERR", error_code: 800, params: null }, 400);
+  if (p.endsWith("/v2/purchases") && world.purchaseStatus === "network") throw new Error("response lost");
+  if (p.endsWith("/v2/purchases") && world.purchaseStatus === 503) return new Response("unavailable", { status: 503, headers: { "retry-after": "0" } });
   if (p.endsWith("/v2/purchases")) return world.purchaseStatus === 200
-    ? json({ results: { id: { $oid: "order1" }, status: "received", amount: 5718, client_pre_estimate: "50-60", currency: "EUR" } })
+    ? json({ results: world.purchaseResult || { id: { $oid: "order1" }, status: "received", amount: world.quoteAmount, client_pre_estimate: "50-60", currency: "EUR" } })
     : new Response("payment declined", { status: world.purchaseStatus });
   throw new Error(`unexpected request ${method} ${u.href}`);
 });
@@ -148,6 +152,8 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.deepEqual(seq.slice(-2), ["/v1/post-checkout-config", "/v2/purchases"], "consents are checked right before paying");
   const body = purchases()[0][2];
   assert.equal(body.client_nonce, q.quoteId, "the quote id is the idempotency nonce");
+  assert(!("ravelin_device_id" in body), "never invent a device identity from a quote UUID");
+  assert(!("browser_info" in body), "never fabricate a shopper's screen or browser");
   assert.equal(body.checkout_id, "chk1");
   assert.equal(body.end_amount, 5718);
   assert.equal(body.delivery_price, 118);
@@ -176,7 +182,7 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
 
   // Spending the same quote twice is refused; the record remembers the order.
   r = await client.callTool({ name: "place_order", arguments: { quote_id: q.quoteId, total: 5718 } });
-  assert.match(r.content[0].text, /already paid \(order order1\)/);
+  assert.match(r.content[0].text, /already submitted \(order order1\)/);
   assert.equal(purchases().length, 1);
   assert.equal(readQuote().orderId, "order1");
 
@@ -199,7 +205,7 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   r = await client.callTool({ name: "prepare_order", arguments: {} });
   const qd = r.structuredContent;
   r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
-  assert.match(r.content[0].text, /card was declined.*Nothing was charged.*Do not retry/s);
+  assert.match(r.content[0].text, /could not authorize.*does not say whether.*Do not retry/s);
   assert.match(r.content[0].text, /opens it in the Wolt app: https:\/\/wolt\.com\/en\/fin\/town\/restaurant\/soup-place/, "the decline hands over the venue link that restores the basket in the app");
   const sent = purchases().length;
   r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
@@ -273,14 +279,122 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(purchases().at(-1)[2].bag_fee, 40, "a basket with a bag fee says so, or Wolt answers \"Purchase validation error\"");
   world.bagFee = null; world.bigVenue = false;
 
-  // Lines sold by weight are refused until their payload is known.
+  // The HAR's gram-based purchase shape: count stays one, the weight and
+  // price per kg carry the quantity, and Wolt's total includes its reserve.
   world.weighted2 = { count: 1, purchased_weight_in_grams: 500, weighted_item_input_type: "grams" };
+  world.weightConfig = { grams_per_step: 250, price_per_kg: 2200, input_type: "grams" };
+  world.originalPrice = 2400;
+  world.quoteAmount = 2638; // 1200 + 1100 + 118 fees + 220 reserve
   r = await client.callTool({ name: "prepare_order", arguments: {} });
-  assert.match(r.content[0].text, /sold by weight/);
-  world.weighted2 = null;
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.equal(r.structuredContent.payableAmount, 2638, "the backend's reserve is part of the amount confirmed");
+  assert.equal(r.structuredContent.items[1].grams, 500);
+  assert.equal(r.structuredContent.items[1].count, 1);
+  const weightedMenu = world.calls.filter(c => c[1].endsWith("/pages/checkout")).at(-1)[2].purchase_plan.menu_items[1];
+  assert.equal(weightedMenu.end_amount, 1100);
+  assert.equal(weightedMenu.weighted.grams_per_step, 250);
+  assert.equal(weightedMenu.original_price, 2400);
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 2638 } });
+  assert.equal(JSON.parse(r.content[0].text).ok, true);
+  const weightedPurchase = purchases().at(-1)[2].items[1];
+  assert.deepEqual(weightedPurchase.weighted_item_info, { count: 1, purchased_weight_in_grams: 500, price_per_kg: 2200, weighted_item_input_type: "grams", grams_per_step: 250 });
+  assert.equal(weightedPurchase.end_amount, 1100);
+  assert.equal(weightedPurchase.original_price, 2400);
+  assert.deepEqual(world.calls.filter(c => c[1].endsWith("/post-checkout-config")).at(-1)[2].basket[1].weighted_item_info, weightedPurchase.weighted_item_info);
+  r = await client.callTool({ name: "checkout_preview", arguments: {} });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.equal(world.calls.filter(c => c[1].endsWith("/pages/checkout")).at(-1)[2].purchase_plan.menu_items[1].end_amount, 1100, "the preview prices 500 g instead of two kilograms");
+  world.weighted2.purchased_weight_in_grams = 501;
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  assert.match(r.content[0].text, /positive multiple/);
+  world.weighted2.purchased_weight_in_grams = 500;
+  world.weightConfig.price_per_kg = 2300;
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  assert.match(r.content[0].text, /price per kg changed/);
+  world.weighted2 = null; world.weightConfig = null; world.originalPrice = null; world.quoteAmount = 5718;
+
+  // Add-ons carry the parent through both calls, inherit its address, and
+  // must remain eligible at payment time. A changed offer never falls back
+  // silently to a standalone delivery with different fees.
+  r = await client.callTool({ name: "get_order_add_on_options", arguments: { purchase_id: "parent1" } });
+  assert.equal(JSON.parse(r.content[0].text).eligible, true);
+  r = await client.callTool({ name: "prepare_order", arguments: { parent_purchase_id: "parent1", address_id: "addr2" } });
+  assert.match(r.content[0].text, /same saved address/);
+  world.addOnVenue = "other-venue";
+  r = await client.callTool({ name: "prepare_order", arguments: { parent_purchase_id: "parent1" } });
+  assert.match(r.content[0].text, /not eligible/);
+  world.addOnVenue = VENUE;
+  world.addOnAddress = "addr2";
+  world.addOnExpiresAt = Date.now() + 45000;
+  r = await client.callTool({ name: "prepare_order", arguments: { parent_purchase_id: "parent1" } });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.match(r.structuredContent.deliveryTo, /Work/, "the parent address wins over the default home");
+  assert(r.structuredContent.expiresInSeconds <= 45);
+  assert.equal(world.calls.filter(c => c[1].endsWith("/pages/checkout")).at(-1)[2].purchase_plan.parent_purchase_id, "parent1");
+  let addOnQuoteId = r.structuredContent.quoteId;
+  const beforeExpired = purchases().length;
+  world.addOnExpiresAt = Date.now() - 1000;
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: addOnQuoteId, total: 5718 } });
+  assert.match(r.content[0].text, /expired or is unavailable/);
+  assert.equal(purchases().length, beforeExpired);
+  world.addOnExpiresAt = Date.now() + 1200000;
+  r = await client.callTool({ name: "prepare_order", arguments: { parent_purchase_id: "parent1" } });
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 5718 } });
+  assert.equal(JSON.parse(r.content[0].text).ok, true);
+  assert.equal(purchases().at(-1)[2].parent_purchase_id, "parent1");
+  assert.equal(purchases().at(-1)[2].additional_checkout_options.no_contact_delivery, true);
+  world.addOnAddress = "addr1";
+
+  // Authentication, asynchronous refusal, a malformed success, and a lost
+  // response must never turn into "Paid" or an automatic transport retry.
+  for (const result of [
+    { id: { $oid: "order-challenge" }, status: "received", payment: { authorization: { type: "redirect", data: { url: "https://bank.example/challenge" } } } },
+    { id: { $oid: "order-pending" }, status: "pending" },
+    { id: { $oid: "order-failed" }, status: "deferred_payment_failed" }
+  ]) {
+    world.purchaseResult = result;
+    r = await client.callTool({ name: "prepare_order", arguments: {} });
+    r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 5718 } });
+    assert.equal(JSON.parse(r.content[0].text).ok, false);
+  }
+  world.purchaseResult = null;
+  for (const failure of ["network", 503]) {
+    world.purchaseStatus = failure;
+    r = await client.callTool({ name: "prepare_order", arguments: {} });
+    const quoteId = r.structuredContent.quoteId, before = purchases().length;
+    r = await client.callTool({ name: "place_order", arguments: { quote_id: quoteId, total: 5718 } });
+    assert.match(r.content[0].text, /outcome is unknown/);
+    r = await client.callTool({ name: "place_order", arguments: { quote_id: quoteId, total: 5718 } });
+    assert.match(r.content[0].text, /unknown outcome/);
+    assert.equal(purchases().length, before + 1, "a payment request is sent only once even with Retry-After");
+  }
+  world.purchaseStatus = 200;
+
+  // Real browser context is quote-bound and echoed without replacing it
+  // with the server's environment or its own random identifier.
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  const browserInfo = { color_depth: 24, java_enabled: false, language: "en-GB", screen_height: 1080, screen_width: 1920, time_zone_offset: -120, user_agent: "Browser test agent" };
+  attachPaymentContext({ quoteId: r.structuredContent.quoteId, browserInfo, deviceId: "sdk-device-from-browser" });
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 5718 } });
+  assert.deepEqual(purchases().at(-1)[2].browser_info, browserInfo);
+  assert.equal(purchases().at(-1)[2].ravelin_device_id, "sdk-device-from-browser");
+
+  await close();
+  const browserRequired = await connect({ allowed: true, cap: null, paymentSetup: () => "https://mcp.example/payment-context#fixture" });
+  r = await browserRequired.client.callTool({ name: "prepare_order", arguments: {} });
+  const browserQuote = r.structuredContent;
+  assert.equal(browserQuote.paymentContextReady, false);
+  assert.match(browserQuote.paymentContextUrl, /payment-context#fixture/);
+  const beforeBrowser = purchases().length;
+  r = await browserRequired.client.callTool({ name: "place_order", arguments: { quote_id: browserQuote.quoteId, total: 5718 } });
+  assert.match(r.content[0].text, /prepare payment in your browser/);
+  assert.equal(purchases().length, beforeBrowser, "remote checkout waits for genuine browser context");
+  attachPaymentContext({ quoteId: browserQuote.quoteId, browserInfo, deviceId: "real-sdk-context-fixture" });
+  r = await browserRequired.client.callTool({ name: "place_order", arguments: { quote_id: browserQuote.quoteId, total: 5718 } });
+  assert.equal(JSON.parse(r.content[0].text).ok, true);
+  await browserRequired.close();
 
   // Over the cap the quote still shows, with a warning the card carries.
-  await close();
   const capped = await connect({ allowed: true, cap: 5000 });
   r = await capped.client.callTool({ name: "prepare_order", arguments: {} });
   assert.match(r.structuredContent.warning, /over the per-order limit/);
