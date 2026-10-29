@@ -12,6 +12,7 @@
 import { woltFetch } from "./http.js";
 import { BASKETS_PAGE_URL, findBasketForVenue, resolveCurrency } from "./wolt.js";
 import { getVenue } from "./venue.js";
+import { orderWeight, itemAmount } from "./weight.js";
 
 export const CHECKOUT_URL = "https://consumer-api.wolt.com/order-xp/web/v2/pages/checkout";
 const ASSORTMENT_BASE = "https://consumer-api.wolt.com/consumer-api/consumer-assortment/v1/venues/slug/";
@@ -93,9 +94,11 @@ export async function loadBasketPlan({ venueId, venueSlug = null, lat, lon, coun
   // the assortment index misses them. The item records call the website uses
   // returns each item's categories alongside; ask it for whatever is left.
   const itemCategories = new Map();
-  const unresolved = (basket.items || []).map((l) => l.id).filter((id) => id && !categoryIndex.has(id));
+  const weightCatalog = new Map();
+  const unresolved = (basket.items || []).filter((l) => l.id && (!categoryIndex.has(l.id) || l.weighted_item_info)).map((l) => l.id);
   if (slug && unresolved.length) {
     const recs = await tryFetchJson(`${ASSORTMENT_BASE}${slug}/assortment/items`, { method: "POST", body: { item_ids: unresolved }, auth: false });
+    for (const it of recs?.items || []) weightCatalog.set(it.id, it);
     for (const c of recs?.categories || []) {
       for (const id of c.item_ids || []) {
         if (!itemCategories.has(id)) itemCategories.set(id, []);
@@ -119,13 +122,14 @@ export async function loadBasketPlan({ venueId, venueSlug = null, lat, lon, coun
       if (isObjectId(line.id)) { categoryId = line.id; warnings.push(`category_id unresolved for ${line.name || line.id}; using item id`); }
       else throw new Error(`cannot resolve category_id for basket item ${line.id}`);
     }
+    const weighted = line.weighted_item_info ? orderWeight(line, weightCatalog.get(line.id)) : null;
     menuItems.push({
       id: line.id,
       venue_id: resolvedVenueId,
-      count,
+      count: weighted ? 1 : count,
       base_price: price,
-      end_amount: count * price,
-      is_weighted_item: !!line.weighted_item_info,
+      end_amount: itemAmount(price, count, weighted),
+      ...(weighted ? { weighted } : {}),
       category_id: categoryId,
       category_ids: itemCategories.get(line.id) || [categoryId],
       alcohol_permille: line.alcohol_permille || 0,

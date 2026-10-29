@@ -32,6 +32,8 @@ import { woltFetch } from "./http.js";
 import { CHECKOUT_URL, loadBasketPlan, checkoutRows } from "./checkout.js";
 import { currentStateDir } from "./context.js";
 import { getVenue } from "./venue.js";
+import { getAddOnOptions, requireAddOn } from "./add-on.js";
+import { orderWeight, itemAmount } from "./weight.js";
 
 const DELIVERY_INFO_URL = "https://restaurant-api.wolt.com/v2/delivery/info";
 const PAYMENT_METHODS_URL = "https://restaurant-api.wolt.com/v3/user/me/payment_methods";
@@ -41,6 +43,7 @@ const PURCHASES_URL = "https://restaurant-api.wolt.com/v2/purchases";
 
 export const QUOTE_TTL_MS = 2 * 60 * 1000;
 const quoteFile = () => join(currentStateDir(), "order-quote.json");
+const placing = new Set();
 
 const minorToText = (amount, currency) => `${(amount / 100).toFixed(2)} ${currency}`;
 
@@ -50,6 +53,17 @@ export function readQuote() {
 function writeQuote(q) {
   mkdirSync(currentStateDir(), { recursive: true });
   writeFileSync(quoteFile(), JSON.stringify(q, null, 2), { mode: 0o600 });
+}
+
+export function attachPaymentContext({ quoteId, browserInfo, deviceId }) {
+  const quote = readQuote();
+  if (!quote || quote.id !== quoteId || quote.expiresAt <= Date.now() || quote.submittedAt) throw new Error("quote expired, replaced or already submitted; prepare a new quote");
+  if (typeof deviceId !== "string" || !deviceId.length || deviceId.length > 512) throw new Error("missing SDK device id");
+  const b = browserInfo || {};
+  if (![b.color_depth, b.screen_height, b.screen_width, b.time_zone_offset].every(Number.isSafeInteger) || b.color_depth <= 0 || b.screen_height <= 0 || b.screen_width <= 0 || Math.abs(b.time_zone_offset) > 1440 || typeof b.java_enabled !== "boolean" || typeof b.language !== "string" || !b.language || b.language.length > 80 || typeof b.user_agent !== "string" || !b.user_agent || b.user_agent.length > 2000) throw new Error("incomplete browser payment information");
+  quote.browserContext = { deviceId, browserInfo: { color_depth: b.color_depth, java_enabled: b.java_enabled, language: b.language, screen_height: b.screen_height, screen_width: b.screen_width, time_zone_offset: b.time_zone_offset, user_agent: b.user_agent } };
+  writeQuote(quote);
+  return { ok: true };
 }
 export function dropQuote() {
   try { unlinkSync(quoteFile()); } catch (e) {}
@@ -162,10 +176,13 @@ export function optionsText(options) {
 
 // Quote the order. Returns the summary the model shows the user; the quote
 // itself is on disk for placeOrder().
-export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon, tip = 0, comment = "", paymentMethodId = null, addressId = null, language = "en" }) {
+export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon, tip = 0, comment = "", paymentMethodId = null, addressId = null, language = "en", parentPurchaseId = null, paymentSetup = null }) {
+  if (placing.has(quoteFile())) throw new Error("a payment is already in progress; wait for its result before preparing another order");
   const plan = await loadBasketPlan({ venueId, venueSlug, lat, lon });
   if (!plan.slug) throw new Error("cannot order: the venue's slug is unknown (pass venue_slug)");
-  const address = pickOne(await savedAddresses(), addressId, "address", (a) => a.labelType === "home");
+  const addOn = parentPurchaseId ? await getAddOnOptions(parentPurchaseId) : null;
+  const address = pickOne(await savedAddresses(), addressId || addOn?.addressId, "address", (a) => a.labelType === "home");
+  if (addOn) requireAddOn(addOn, plan.venueId, address.id);
   const card = pickOne(await savedCards(), paymentMethodId, "card", (c) => c.isDefault);
   const catalog = await catalogItems(plan.slug, plan.lines.map((l) => l.id), language);
 
@@ -173,19 +190,25 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
     const it = catalog.items.get(line.id);
     if (!it) throw new Error(`${line.name || line.id} is no longer in the venue's catalog; remove it from the basket`);
     if (it.disabled_info) throw new Error(`${it.name || line.id} is currently unavailable; remove it from the basket`);
-    const count = line.count > 0 ? line.count : 1;
-    if (line.weighted_item_info || it.sell_by_weight_config) throw new Error(`${it.name || line.id} is sold by weight, which this server does not order yet; order on wolt.com`);
+    const weighted = orderWeight(line, it);
+    const count = weighted ? 1 : (line.count > 0 ? line.count : 1);
     if (it.price !== line.price) throw new Error(`the price of ${it.name || line.id} changed since it was added (${line.price} -> ${it.price}); re-add it and quote again`);
     const options = purchaseOptions(line, it, catalog.options, language);
+    if (weighted && options.length) throw new Error(`${it.name || line.id}: weighted items with options must be ordered on wolt.com`);
     const unit = it.price + optionsPrice(options);
+    const endAmount = itemAmount(unit, count, weighted);
     // The quote prices the same picks: the basket page carries no value
     // prices, so they are filled in from the catalog here.
     plan.menuItems[i].options = options.map((o) => ({ id: o.id, values: o.values.map((v) => ({ id: v.id, count: v.count, price: v.price })) }));
-    plan.menuItems[i].end_amount = unit * count;
+    plan.menuItems[i].count = count;
+    plan.menuItems[i].end_amount = endAmount;
+    if (weighted) plan.menuItems[i].weighted = weighted;
+    if (it.original_price != null) plan.menuItems[i].original_price = it.original_price;
     return {
       id: line.id,
       configIndex: i,
       count,
+      ...(weighted ? { weighted_item_info: weighted } : {}),
       name: [{ value: it.name || line.name || "", lang: language }],
       category: plan.menuItems[i].category_id,
       exclude_from_credits: !!it.exclude_from_credits,
@@ -200,7 +223,8 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
       vat_percentage: it.vat_percentage || 0,
       ...(it.vat_percentage_decimal != null ? { vat_percentage_decimal: it.vat_percentage_decimal } : {}),
       baseprice: it.price,
-      end_amount: unit * count,
+      end_amount: endAmount,
+      ...(it.original_price != null ? { original_price: it.original_price } : {}),
       restrictions: it.restrictions || [],
       ...(lowestPrice(it) != null ? { lowest_price: lowestPrice(it) } : {}),
       options: options.map(({ freeSelections, ...o }) => o),
@@ -212,6 +236,7 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
 
   const payload = {
     purchase_plan: {
+      ...(addOn ? { parent_purchase_id: parentPurchaseId } : {}),
       courier_tip: tip,
       delivery: { delivery_coordinates: { longitude: address.lon, latitude: address.lat }, delivery_info_id: address.id },
       delivery_method: "homedelivery",
@@ -240,7 +265,8 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
   const quote = {
     id: randomUUID(),
     createdAt: now,
-    expiresAt: now + QUOTE_TTL_MS,
+    expiresAt: Math.min(now + QUOTE_TTL_MS, addOn?.expiresAt ?? Infinity),
+    ...(addOn ? { addOn } : {}),
     checkoutId: j.id,
     venue: { id: plan.venueId, slug: plan.slug, name: plan.venue.name || null, currency: plan.currency, country: plan.country },
     items,
@@ -255,6 +281,7 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
     card: { id: card.id, title: card.title, number: card.number },
     rows: checkoutRows(j)
   };
+  if (paymentSetup) quote.paymentContextUrl = await paymentSetup(quote);
   writeQuote(quote);
   return summarize(quote);
 }
@@ -262,9 +289,11 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
 export function summarize(quote) {
   return {
     quoteId: quote.id,
+    ...(quote.paymentContextUrl ? { paymentContextUrl: quote.paymentContextUrl, paymentContextReady: !!quote.browserContext } : {}),
     expiresInSeconds: Math.max(0, Math.round((quote.expiresAt - Date.now()) / 1000)),
     venue: quote.venue.name || quote.venue.slug,
-    items: quote.items.map((it) => ({ name: it.name[0].value, count: it.count, price: it.baseprice, ...(it.options.length ? { options: optionsText(it.options), priceWithOptions: it.end_amount / it.count } : {}) })),
+    items: quote.items.map((it) => ({ name: it.name[0].value, count: it.count, price: it.baseprice, endAmount: it.end_amount, ...(it.weighted_item_info ? { grams: it.weighted_item_info.purchased_weight_in_grams, pricePerKg: it.weighted_item_info.price_per_kg } : {}), ...(it.options.length ? { options: optionsText(it.options), priceWithOptions: it.end_amount / it.count } : {}) })),
+    ...(quote.addOn ? { parentPurchaseId: quote.addOn.parentPurchaseId, addOnExpiresAt: quote.addOn.expiresAt, deliveryDisclaimer: quote.addOn.disclaimer } : {}),
     rows: quote.rows,
     payableAmount: quote.endAmount,
     currency: quote.venue.currency,
@@ -273,7 +302,8 @@ export function summarize(quote) {
     paidWith: [quote.card.title, quote.card.number].filter(Boolean).join(" "),
     eta: quote.estimate,
     tip: quote.tip,
-    next: `Show the user the total, the address and the card. If they confirm, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
+    ...(quote.items.some(it => it.weighted_item_info) ? { warnings: ["The total includes Wolt's weight reserve. The final charge can change with the actual picked weight."] } : {}),
+    next: `${quote.paymentContextUrl ? "Give the user paymentContextUrl to prepare payment in their browser first (it does not charge). " : ""}Show the user the total, the address and the card. If they confirm, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
   };
 }
 
@@ -288,13 +318,25 @@ function consentBasket(items) {
 // Pay. `total` is the minor-units total the user confirmed; `cap` an optional
 // per-order ceiling in minor units from the grant.
 export async function placeOrder({ quoteId, total, cap = null, now = Date.now() }) {
+  const key = quoteFile();
+  if (placing.has(key)) throw new Error("a payment is already in progress for this account; wait for its result and do not submit another order");
+  placing.add(key);
+  try { return await submitOrder({ quoteId, total, cap, now }); }
+  finally { placing.delete(key); }
+}
+
+async function submitOrder({ quoteId, total, cap, now }) {
   const quote = readQuote();
   if (!quote || quote.id !== quoteId) throw new Error("that quote is unknown or was replaced; call prepare_order again");
   if (quote.declined) throw new Error("the card was declined for this quote; do not retry from here, the user should pay in the Wolt app or with another card");
-  if (quote.orderId) throw new Error(`this quote was already paid (order ${quote.orderId}); prepare a new one for another order`);
+  if (quote.orderId) throw new Error(`this quote was already submitted (order ${quote.orderId}); check it in Wolt instead of submitting it again`);
+  if (quote.submittedAt && !quote.lastError) throw new Error("the previous payment attempt has an unknown outcome; check the order in Wolt before making another purchase; do not retry this quote");
   if (now > quote.expiresAt) { dropQuote(); throw new Error("the quote expired (two minutes); call prepare_order again and re-confirm the total with the user"); }
   if (total !== quote.endAmount) throw new Error(`the total you passed (${total}) is not the quoted ${quote.endAmount} ${quote.venue.currency}; show the user the quote and pass its payableAmount`);
   if (cap != null && quote.endAmount > cap) throw new Error(`this order (${minorToText(quote.endAmount, quote.venue.currency)}) is over the per-order limit set when this connection was approved (${minorToText(cap, quote.venue.currency)})`);
+  if (quote.paymentContextUrl && !quote.browserContext) throw new Error(`Open ${quote.paymentContextUrl} and prepare payment in your browser, then return here to confirm this quote's total. Nothing was charged.`);
+
+  if (quote.addOn) requireAddOn(await getAddOnOptions(quote.addOn.parentPurchaseId), quote.venue.id, quote.address.id);
 
   const cfg = await woltFetch(POST_CHECKOUT_CONFIG_URL, { method: "POST", body: { venue_id: quote.venue.id, country: quote.venue.country, basket: consentBasket(quote.items) } });
   if (!cfg.ok) throw new Error(`the pre-payment check failed, nothing was charged: HTTP ${cfg.status} ${cfg.text.slice(0, 200)}`);
@@ -304,7 +346,8 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
   const v = quote.validation;
   const body = {
     client_nonce: quote.id,
-    ravelin_device_id: `rjs-${quote.id}`,
+    // ravelin_device_id is optional. Only its browser SDK may generate it;
+    // a quote UUID is not a device identity and must never be sent as one.
     signature_datetime: { $date: now },
     language: quote.language,
     currency: quote.venue.currency,
@@ -324,8 +367,9 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
     device_channel: "browser",
     to_type: "venue",
     venue_id: quote.venue.id,
-    browser_info: { color_depth: 24, java_enabled: false, language: quote.language, screen_height: 900, screen_width: 1440, time_zone_offset: 0, user_agent: "wolt-mcp" },
-    payment_links: { return_url: `https://wolt.com/${quote.language}` }, // only redirect payments use it; a saved card never redirects
+    ...(quote.addOn ? { parent_purchase_id: quote.addOn.parentPurchaseId } : {}),
+    ...(quote.browserContext ? { browser_info: quote.browserContext.browserInfo, ravelin_device_id: quote.browserContext.deviceId } : {}),
+    payment_links: { return_url: `https://wolt.com/${quote.language}` },
     delivery_info: { id: { $oid: quote.address.id }, use_last_100m_address_picker: true },
     delivery_price: quote.deliveryPrice,
     // The website echoes these from the quote's validation block when set; the
@@ -334,7 +378,7 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
     ...(v.bag_fee != null ? { bag_fee: v.bag_fee } : {}),
     ...(v.credits_amount != null ? { credits_amount: v.credits_amount } : {}),
     ...(v.end_amount_rounding != null ? { end_amount_rounding: v.end_amount_rounding } : {}),
-    additional_checkout_options: { no_contact_delivery: false },
+    additional_checkout_options: { no_contact_delivery: quote.addOn?.noContactDelivery ?? false },
     discounts: v.discounts || [],
     offers: v.offers || [],
     surcharges: v.surcharges || [],
@@ -347,15 +391,23 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
 
   // Mark the attempt before sending: a crash between the request and the
   // response must not leave a quote that looks unspent.
-  quote.submittedAt = now;
+  const submittedAt = Math.max(now, Date.now());
+  if (submittedAt >= quote.expiresAt) throw new Error("the quote expired during the pre-payment check; prepare a new quote and confirm its total");
+  quote.submittedAt = submittedAt;
+  delete quote.lastError;
   writeQuote(quote);
-  const r = await woltFetch(PURCHASES_URL, { method: "POST", body });
+  // A transport retry must not create a second financial operation. An
+  // ambiguous outcome stays submitted until the user checks Wolt.
+  let r;
+  try { r = await woltFetch(PURCHASES_URL, { method: "POST", body, retry: false }); }
+  catch (e) { throw new Error("The payment response was lost. Its outcome is unknown; check your orders in Wolt before ordering again. Do not retry this quote."); }
   if (!r.ok) {
+    // Server errors can happen after a purchase was accepted.
+    if (r.status >= 500 || r.status === 408) throw new Error(`Wolt returned HTTP ${r.status}; the payment outcome is unknown. Check your orders in Wolt before ordering again. Do not retry this quote.`);
     quote.lastError = `HTTP ${r.status} ${r.text.slice(0, 300)}`;
     writeQuote(quote);
-    // error_code 800 "Failed to process card" is the card's authorization
-    // being declined (Adyen, then the bank). Wolt records it as a failed order
-    // and nothing is held; another try only adds another failed order.
+    // Error 800 is opaque: it does not identify the bank, provider or risk
+    // check that refused authorization. A new quote must not retry it.
     if (r.json?.error_code === 800 || /process card/i.test(r.json?.msg || "")) {
       quote.declined = true;
       writeQuote(quote);
@@ -363,15 +415,22 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
       // Wolt app ("Continue order?"), where the payment usually goes through.
       let link = null;
       try { link = (await getVenue(quote.venue.slug)).shareUrl || null; } catch (e) { /* the message still stands without it */ }
-      throw new Error(`The card was declined (Wolt: "${r.json?.msg || "Failed to process card"}"). Nothing was charged; Wolt lists the attempt as a failed order. Do not retry from here: the payment was stopped by Wolt's payment checks, which a server-side order can trip where the Wolt app does not. The basket is still there; give the user ${link ? `this link, which opens it in the Wolt app: ${link}` : "the Wolt app"} to pay there, or another card.`);
+      throw new Error(`Wolt could not authorize the card payment (error 800: "${r.json?.msg || "Failed to process card"}"). The response does not say whether the bank, payment provider or Wolt refused it. Do not retry from here. Give the user ${link ? `this link, which opens it in the Wolt app: ${link}` : "the Wolt app"} to review the attempt and complete any required authentication or choose another card.`);
     }
     throw new Error(`Wolt refused the purchase: ${quote.lastError}. The same quote can be retried once if this looks transient; otherwise order on wolt.com`);
   }
   const res = r.json?.results || r.json || {};
   const orderId = res.id?.$oid || res.id || res.purchase_id || null;
+  const payment = res.payment || r.json?.payment;
+  const paymentStatus = payment?.status || res.payment_status || r.json?.payment_status;
+  const requiresAction = !!(payment?.authorization || payment?.authorization_url || res.authorization || r.json?.authorization || /authorization_required|authorization_started/i.test(paymentStatus || ""));
+  if (!orderId && !requiresAction) throw new Error("Wolt returned no order id; the payment outcome is unknown. Check your orders in Wolt before ordering again. Do not retry this quote.");
   quote.orderId = orderId || "unknown";
   quote.status = res.status || null;
   writeQuote(quote);
+  if (requiresAction || !["received", "confirmed", "production", "ready", "delivered"].includes(res.status) || (paymentStatus && !/^(paid|authorized|authorised|authorization_succeeded|completed|success|succeeded)$/i.test(paymentStatus))) {
+    return { ok: false, orderId, status: res.status || null, requiresAction, note: "Payment is not confirmed. Open Wolt to check this order and complete any payment authentication. Do not place a second order." };
+  }
   return {
     ok: true,
     orderId,

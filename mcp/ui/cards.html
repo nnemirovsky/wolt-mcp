@@ -305,6 +305,8 @@
           (c.checkoutUrl ? '<div class="actions"><button class="primary" data-act="' + act(function () { open(c.checkoutUrl); }) + '">Pay on Wolt</button></div>' : "") +
           (c.warnings && c.warnings.length ? '<div class="note">' + esc(c.warnings.join(" ")) + "</div>" : "") +
           (c.warning ? '<div class="note">' + esc(c.warning) + "</div>" : "") +
+          (c.paymentContextUrl ? '<div class="actions"><button class="primary" data-act="' + act(function () { open(c.paymentContextUrl); }) + '">Prepare card payment</button></div><div class="note">Prepare payment in your browser, then return here to confirm the total.</div>' : "") +
+          (c.deliveryDisclaimer ? '<div class="note">' + esc(c.deliveryDisclaimer) + '</div>' : "") +
           (c.quoteId ? '<div class="note">Nothing is ordered yet. Confirm the total in the chat to place it.</div>' : "");
         break;
       }

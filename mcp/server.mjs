@@ -4,7 +4,7 @@
 // Design: the MCP *client's* model does the reasoning — read the recipe, pick
 // the product, choose the venue — so there's no hosted LLM and no API key here.
 // This server exposes the Wolt primitives: search, browse menus, read and write
-// baskets, preview checkout. Ordering and payment always happen on wolt.com.
+// baskets and preview checkout, with saved-card ordering when opted in.
 //
 // Auth: search needs none. Account and basket calls need a token — connect once
 // via login_via_chrome (or set_wolt_token); it auto-renews after that.
@@ -31,6 +31,7 @@ import { serveHttp, parseHttpArgs } from "./lib/remote.js";
 import { getLocation, setLocation, estimateLocation } from "./lib/config.js";
 import { checkoutPreview } from "./lib/checkout.js";
 import { prepareOrder, placeOrder, orderingFromEnv } from "./lib/order.js";
+import { getAddOnOptions } from "./lib/add-on.js";
 import { cdpLogin } from "./lib/cdp-login.js";
 import { getVenue, getMenu, getItemOptions, getCategories, resolveItem, parseItemUrl, searchVenueItems, getCatalogLanguage, getMarketLanguage, getWeightConfigs } from "./lib/venue.js";
 import { getOrderHistory, getOrder, geocodeAddress } from "./lib/account.js";
@@ -186,7 +187,7 @@ const PAYS = { readOnlyHint: false, destructiveHint: true, idempotentHint: false
 export const TOOL_ANNOTATIONS = {
   search_products: READ, search_restaurant_dishes: READ, plan_cart: READ, get_baskets: READ,
   get_venue: READ, get_venue_menu: READ, get_venue_categories: READ, find_item: READ, get_dish_options: READ,
-  get_order_history: READ, get_order: READ, resolve_address: READ, get_feed: READ, top_venues: READ,
+  get_order_history: READ, get_order: READ, get_order_add_on_options: READ, resolve_address: READ, get_feed: READ, top_venues: READ,
   search_venues: READ, get_payment_methods: READ, get_favorites: READ, checkout_preview: READ,
   get_wolt_profile: READ, wolt_status: READ, show_picks: READ, prepare_order: READ,
   // These change the basket, the account, or this server's own saved state.
@@ -817,7 +818,17 @@ tool(
   }
 );
 
-// --- get_payment_methods (read-only) ---
+// --- order add-ons and saved payment methods (read-only) ---
+tool(
+  "get_order_add_on_options",
+  "Check Wolt's time-limited add-on offer for an existing order. Returns eligible venues, the saved address, the exact deadline and Wolt's delivery terms. No added delivery fee may apply, but service fees and minimums still can; one courier is not guaranteed. Pass parent_purchase_id to prepare_order for an eligible venue. Read-only; never orders.",
+  { purchase_id: z.string().min(1).describe("Existing order id from place_order or get_order_history") },
+  async ({ purchase_id }) => {
+    try { return text(await getAddOnOptions(purchase_id)); }
+    catch (e) { return errText(e.message); }
+  }
+);
+
 tool(
   "get_payment_methods",
   "The user's saved Wolt payment methods (needs a token). Read-only. Payment happens on wolt.com, or through place_order with a saved card when this connection was approved for ordering.",
@@ -905,7 +916,7 @@ tool(
 const NOT_ALLOWED = "This connection is not allowed to place orders. The user can enable it by connecting again and ticking \"allow this connection to place and pay for orders\" on the approve page (WOLT_ALLOW_ORDERS=1 for a local server). Until then, send them to wolt.com to check out: the venue link opens the saved basket.";
 tool(
   "prepare_order",
-  "Quote the user's basket at one venue for a real order: the exact total Wolt will charge (items, fees, delivery, credits), the saved address it goes to and the saved card it is paid with. Orders nothing; the quote is valid two minutes. Needs login and the ordering permission on this connection. Show the user the total, address and card and ask for an explicit yes before place_order. Dishes with options are quoted with their picks; a pick the venue no longer offers is refused.",
+  "Quote the user's basket at one venue for a real order: total including fees, delivery, credits and any weight reserve, saved address and saved card. Supports multiple quantities, dish options, and items sold in grams (final weight may change the charge). Orders nothing; quote valid up to two minutes. If paymentContextUrl is returned, give the user that link to prepare payment in their browser before confirmation; it does not charge. For an add-on, check get_order_add_on_options and pass parent_purchase_id; same address, eligible venue and deadline are enforced. Needs ordering permission. Show the total, address and card and wait for an explicit yes before place_order.",
   {
     venue_id: z.string().optional().describe("Venue id (24 hex) of the basket to order; defaults to the user's only/first basket"),
     venue_slug: z.string().optional().describe("venueSlug from search results"),
@@ -913,13 +924,14 @@ tool(
     comment: z.string().max(500).optional().describe("Note to the courier/venue"),
     payment_method_id: z.string().optional().describe("A specific saved card id from get_payment_methods; defaults to the default card"),
     address_id: z.string().optional().describe("A specific saved address id from use_saved_address; defaults to the home address"),
+    parent_purchase_id: z.string().min(1).optional().describe("Existing order for a time-limited add-on; first check get_order_add_on_options"),
     lat: z.number().optional(), lon: z.number().optional()
   },
-  async ({ venue_id, venue_slug, tip, comment, payment_method_id, address_id, lat, lon }, _extra, ordering) => {
+  async ({ venue_id, venue_slug, tip, comment, payment_method_id, address_id, parent_purchase_id, lat, lon }, _extra, ordering) => {
     if (!ordering?.allowed) return errText(NOT_ALLOWED);
     try {
       ({ lat, lon } = await needLocation(lat, lon));
-      const quote = await prepareOrder({ venueId: venue_id || null, venueSlug: venue_slug || null, lat, lon, tip, comment: comment || "", paymentMethodId: payment_method_id || null, addressId: address_id || null });
+      const quote = await prepareOrder({ venueId: venue_id || null, venueSlug: venue_slug || null, lat, lon, tip, comment: comment || "", paymentMethodId: payment_method_id || null, addressId: address_id || null, parentPurchaseId: parent_purchase_id || null, paymentSetup: ordering.paymentSetup || null });
       if (ordering.cap != null && quote.payableAmount > ordering.cap) {
         quote.warning = `over the per-order limit set for this connection (${(ordering.cap / 100).toFixed(2)} ${quote.currency}); place_order will refuse it`;
       }
