@@ -143,6 +143,7 @@
     });
   }
   var checkoutGeneration = 0;
+  var activeCheckout = null;
   var paymentResults = {};
   function publishPaymentResult(c, result) {
     paymentResults[c.quoteId] = result;
@@ -293,6 +294,14 @@
 
   function render(data) {
     if (!data || typeof data !== "object") return;
+    // Tool-call notifications can carry plain outcomes instead of a view.
+    // Route matching payment outcomes to the current card; background tool
+    // results must not replace checkout with a raw JSON block.
+    if (typeof data.view !== "string") {
+      if (activeCheckout && data.quoteId === activeCheckout.quoteId && typeof data.ok === "boolean") showPaymentResult(activeCheckout, data, true);
+      return;
+    }
+    activeCheckout = data.view === "checkout" && data.quoteId ? data : null;
     try { root.innerHTML = draw(data); root.className = ""; rendered = true; if (data.view === "checkout" && data.quoteId) prepareCheckout(data); }
     catch (e) {
       // A drawing bug must not hide the result: fall back to the raw data.
