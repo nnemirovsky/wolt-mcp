@@ -30,7 +30,7 @@ import { setTokens, describeTokens, getAccessToken, exportRefreshToken, isRemote
 import { serveHttp, parseHttpArgs } from "./lib/remote.js";
 import { getLocation, setLocation, estimateLocation } from "./lib/config.js";
 import { checkoutPreview } from "./lib/checkout.js";
-import { prepareOrder, placeOrder, orderingFromEnv, attachPaymentContext, PaymentRefusal } from "./lib/order.js";
+import { prepareOrder, placeOrder, orderingFromEnv, attachPaymentContext, paymentContextStatus, PaymentRefusal } from "./lib/order.js";
 import { getAddOnOptions } from "./lib/add-on.js";
 import { cdpLogin } from "./lib/cdp-login.js";
 import { getVenue, getMenu, getItemOptions, getCategories, resolveItem, parseItemUrl, searchVenueItems, getCatalogLanguage, getMarketLanguage, getWeightConfigs } from "./lib/venue.js";
@@ -189,7 +189,7 @@ export const TOOL_ANNOTATIONS = {
   get_venue: READ, get_venue_menu: READ, get_venue_categories: READ, find_item: READ, get_dish_options: READ,
   get_order_history: READ, get_order: READ, get_order_add_on_options: READ, resolve_address: READ, get_feed: READ, top_venues: READ,
   search_venues: READ, get_payment_methods: READ, get_favorites: READ, checkout_preview: READ,
-  get_wolt_profile: READ, wolt_status: READ, show_picks: READ, prepare_order: READ,
+  get_wolt_profile: READ, wolt_status: READ, show_picks: READ, prepare_order: READ, get_order_payment_context: READ,
   // These change the basket, the account, or this server's own saved state.
   use_saved_address: WRITE, add_to_cart: WRITE, update_cart_item: WRITE, add_favorite: WRITE,
   remove_favorite: WRITE, login_via_chrome: WRITE, set_wolt_token: WRITE, set_location: WRITE,
@@ -227,7 +227,7 @@ const INSTRUCTIONS = (remote) => "When the user wants to BUY something (not just
 // remote transport, by WOLT_ALLOW_ORDERS / WOLT_ORDER_CAP on stdio.
 export function buildServer({ remote = false, ordering = null } = {}) {
   const server = new McpServer({ name: "wolt-mcp", version: VERSION }, {
-    instructions: INSTRUCTIONS(remote) + " For the delivery address: use_saved_address pulls the user's saved Wolt addresses and sets one as the search location (get_wolt_profile does NOT have addresses); a spoken address goes through resolve_address + set_location. Baskets are single-venue: source every item from one store. The fast path for a shopping list is wolt_status -> use_saved_address (if no location) -> ONE plan_cart call (it auto-picks the store and reports runner-up coverage) -> review the matches -> add_to_cart -> checkout_preview. wolt_status and the address tools report the market's catalogLanguage — translate the ingredient list into it BEFORE calling plan_cart (Greek in Greece, Japanese in Japan, Hebrew in Israel, Georgian in Georgia, and so on), and write each product in dictionary form (singular nominative, like a shelf label) since catalog search matches prefixes and inflected words find little or nothing; plan_cart refuses off-language lists with needsTranslation. Don't compare stores manually with repeated searches unless the user asks, and never write a lowCoverage plan without agreeing with the user first. Pictures: items and venues come with imageUrl, Wolt's own photo on a public CDN — show those when you illustrate results, never stock or web-search images, and if you can't embed them, link them. Whenever you present a shortlist — dinner ideas, the best venues nearby, product options — research with the search/feed/menu tools (they return text) and then call show_picks ONCE with the final picks (names, prices, imageUrl, rating, venue) so they appear as one set of photo cards; keep the prose short since the cards carry the details. Only show_picks, checkout_preview and prepare_order draw a card; get_baskets is a plain lookup, so for \"add X\" or \"clear my basket\" do the write and report it in a sentence rather than listing every basket. Ordering: only when the user asks to order or pay, and only if this connection was approved for it (place_order says so otherwise). prepare_order quotes the basket with the saved address and card. Its card prepares real device data automatically and lets the user Confirm and pay without typing Done; that explicit button click confirms the displayed total. In text chat, show the total, address and card, wait for explicit confirmation, then call place_order. Let the checkout card own its confirmation; do not create a second custom Confirm button or repeat a ready-for-confirmation card underneath it. A local device-preparation check is not a Wolt rejection. Never call place_order without the user confirming that exact total in this conversation."
+    instructions: INSTRUCTIONS(remote) + " For the delivery address: use_saved_address pulls the user's saved Wolt addresses and sets one as the search location (get_wolt_profile does NOT have addresses); a spoken address goes through resolve_address + set_location. Baskets are single-venue: source every item from one store. The fast path for a shopping list is wolt_status -> use_saved_address (if no location) -> ONE plan_cart call (it auto-picks the store and reports runner-up coverage) -> review the matches -> add_to_cart -> checkout_preview. wolt_status and the address tools report the market's catalogLanguage — translate the ingredient list into it BEFORE calling plan_cart (Greek in Greece, Japanese in Japan, Hebrew in Israel, Georgian in Georgia, and so on), and write each product in dictionary form (singular nominative, like a shelf label) since catalog search matches prefixes and inflected words find little or nothing; plan_cart refuses off-language lists with needsTranslation. Don't compare stores manually with repeated searches unless the user asks, and never write a lowCoverage plan without agreeing with the user first. Pictures: items and venues come with imageUrl, Wolt's own photo on a public CDN — show those when you illustrate results, never stock or web-search images, and if you can't embed them, link them. Whenever you present a shortlist — dinner ideas, the best venues nearby, product options — research with the search/feed/menu tools (they return text) and then call show_picks ONCE with the final picks (names, prices, imageUrl, rating, venue) so they appear as one set of photo cards; keep the prose short since the cards carry the details. Only show_picks, checkout_preview and prepare_order draw a card; get_baskets is a plain lookup, so for \"add X\" or \"clear my basket\" do the write and report it in a sentence rather than listing every basket. Ordering: only when the user asks to order or pay, and only if this connection was approved for it (place_order says so otherwise). prepare_order quotes the basket with the saved address and card. Its card reuses recent device preparation, collects it inline where supported, or detects completion of browser preparation, and lets the user Confirm and pay without typing Done; that explicit button click confirms the displayed total. In text chat, show the total, address and card, wait for explicit confirmation, then call place_order. Let the checkout card own its confirmation; do not create a second custom Confirm button or repeat a ready-for-confirmation card underneath it. A local device-preparation check is not a Wolt rejection. Never call place_order without the user confirming that exact total in this conversation."
   });
   for (const t of registry) {
     if (remote && LOCAL_ONLY_TOOLS.has(t.name)) continue;
@@ -916,7 +916,7 @@ tool(
 const NOT_ALLOWED = "This connection is not allowed to place orders. The user can enable it by connecting again and ticking \"allow this connection to place and pay for orders\" on the approve page (WOLT_ALLOW_ORDERS=1 for a local server). Until then, send them to wolt.com to check out: the venue link opens the saved basket.";
 tool(
   "prepare_order",
-  "Quote the user's basket at one venue for a real order: total including fees, delivery, credits and any weight reserve, saved address and saved card. Supports multiple quantities, dish options, and items sold in grams (final weight may change the charge). Orders nothing; quote valid up to two minutes. The rendered card prepares device data automatically and offers Confirm and pay; never ask the user to type Done. paymentContextUrl is only a fallback when inline preparation is unavailable. For an add-on, check get_order_add_on_options and pass parent_purchase_id; same address, eligible venue and deadline are enforced. Needs ordering permission. Show the total, address and card and wait for an explicit yes before place_order.",
+  "Quote the user's basket at one venue for a real order: total including fees, delivery, credits and any weight reserve, saved address and saved card. Supports multiple quantities, dish options, and items sold in grams (final weight may change the charge). Orders nothing; quote valid up to two minutes. The rendered card reuses recent preparation and offers Confirm and pay; never ask the user to type Done. Embedded iPhone/iPad cards use paymentContextUrl when browser preparation is needed and detect completion automatically; other compatible hosts can prepare inline. For an add-on, check get_order_add_on_options and pass parent_purchase_id; same address, eligible venue and deadline are enforced. Needs ordering permission. Show the total, address and card and wait for an explicit yes before place_order.",
   {
     venue_id: z.string().optional().describe("Venue id (24 hex) of the basket to order; defaults to the user's only/first basket"),
     venue_slug: z.string().optional().describe("venueSlug from search results"),
@@ -957,6 +957,17 @@ tool(
   async ({ quote_id, device_id, browser_info }, _extra, ordering) => {
     if (!ordering?.allowed) return errText(NOT_ALLOWED);
     try { return text(attachPaymentContext({ quoteId: quote_id, deviceId: device_id, browserInfo: browser_info })); }
+    catch (e) { return errText(e.message); }
+  },
+  { _meta: { ui: { visibility: ["app"] }, "openai/widgetAccessible": true, "openai/visibility": "private" } }
+);
+tool(
+  "get_order_payment_context",
+  "Checkout UI only: check whether browser preparation has completed for this quote. Reads local preparation state only; never calls Wolt or submits an order.",
+  { quote_id: z.string().uuid(), require_browser: z.boolean().default(false) },
+  async ({ quote_id, require_browser }, _extra, ordering) => {
+    if (!ordering?.allowed) return errText(NOT_ALLOWED);
+    try { return text(paymentContextStatus({ quoteId: quote_id, requireBrowser: require_browser })); }
     catch (e) { return errText(e.message); }
   },
   { _meta: { ui: { visibility: ["app"] }, "openai/widgetAccessible": true, "openai/visibility": "private" } }

@@ -55,7 +55,9 @@ function retryAfterMs(res) {
   return Number.isFinite(at) ? Math.min(Math.max(at - Date.now(), 0), MAX_RETRY_AFTER_MS) : null;
 }
 
-// Returns { ok, status, json, text }. Throws only on missing-token (with the
+// Returns { ok, status, json, text, requestIds }. Only allowlisted response
+// correlation IDs are retained; cookies and arbitrary headers never are.
+// Throws only on missing-token (with the
 // user-facing setup guidance from auth.js) or network-level failure.
 // auth: true needs a token; false never sends one; "optional" sends one when
 // the account is connected and goes anonymous otherwise — for pages Wolt
@@ -115,5 +117,10 @@ export async function woltFetch(url, { method = "GET", body = null, lang = "en",
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch (e) {}
-  return { ok: res.ok, status: res.status, json, text };
+  const requestIds = {};
+  for (const name of ["x-request-id", "x-correlation-id", "x-wolt-request-id", "x-amzn-requestid", "x-amz-cf-id", "cf-ray"]) {
+    const value = res.headers.get(name);
+    if (typeof value === "string" && /^[A-Za-z0-9_.:/+=-]{1,256}$/.test(value)) requestIds[name] = value;
+  }
+  return { ok: res.ok, status: res.status, json, text, requestIds };
 }

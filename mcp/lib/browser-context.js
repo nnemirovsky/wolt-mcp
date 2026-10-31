@@ -14,8 +14,8 @@ export function validateBrowserContext({ browserInfo, deviceId }) {
   return { deviceId, browserInfo: { color_depth: b.color_depth, java_enabled: b.java_enabled, language: b.language, screen_height: b.screen_height, screen_width: b.screen_width, time_zone_offset: b.time_zone_offset, user_agent: b.user_agent } };
 }
 
-export function rememberBrowserContext(value, now = Date.now()) {
-  const context = validateBrowserContext(value);
+export function rememberBrowserContext(value, now = Date.now(), source = "inline") {
+  const context = { ...validateBrowserContext(value), source: source === "browser" ? "browser" : "inline" };
   mkdirSync(currentStateDir(), { recursive: true });
   writeFileSync(file(), JSON.stringify({ ...context, capturedAt: now, expiresAt: now + BROWSER_CONTEXT_TTL_MS }), { mode: 0o600 });
   return context;
@@ -25,6 +25,6 @@ export function recentBrowserContext(now = Date.now()) {
   try {
     const c = JSON.parse(readFileSync(file(), "utf8"));
     if (!Number.isFinite(c.capturedAt) || c.capturedAt > now || c.expiresAt <= now || c.expiresAt - c.capturedAt !== BROWSER_CONTEXT_TTL_MS) return null;
-    return validateBrowserContext(c);
+    return { ...validateBrowserContext(c), source: ["browser", "inline"].includes(c.source) ? c.source : "unknown" };
   } catch { return null; }
 }

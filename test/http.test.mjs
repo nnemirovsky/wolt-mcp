@@ -29,6 +29,14 @@ const fail = (msg) => { console.error(`✗ ${msg}`); process.exit(1); };
 let r = await woltFetch("https://x.test/a", { fetchImpl: stub([mkRes(200, '{"v":1}')]) });
 if (!r.ok || r.json?.v !== 1 || calls !== 1) fail("success path");
 
+// Retain only bounded support correlation IDs, never credentials/cookies.
+r = await woltFetch("https://x.test/diagnostic", { fetchImpl: stub([mkRes(400, '{}', {
+  "x-amz-cf-id": "support-reference_123==", "x-request-id": "request-123",
+  "x-correlation-id": "bad\nheader", "cf-ray": "x".repeat(257),
+  "set-cookie": "private-cookie", "authorization": "private-token"
+})]) });
+if (JSON.stringify(r.requestIds) !== JSON.stringify({ "x-request-id": "request-123", "x-amz-cf-id": "support-reference_123==" })) fail("only safe response correlation IDs are retained");
+
 // 429 with Retry-After retries once
 r = await woltFetch("https://x.test/b", { fetchImpl: stub([mkRes(429, "slow down", { "retry-after": "0" }), mkRes(200, '{"v":2}')]) });
 if (!r.ok || r.json?.v !== 2 || calls !== 2) fail("retry-after path");

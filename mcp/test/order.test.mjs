@@ -3,7 +3,7 @@
 // protects the user's money (total mismatch, cap, expiry, price drift,
 // unknown option picks, consents, double spend) and the exact purchase payload.
 import assert from "node:assert";
-import { mkdtempSync, statSync, existsSync, unlinkSync } from "node:fs";
+import { mkdtempSync, statSync, existsSync, unlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,6 +16,7 @@ const { setFetchImpl } = await import("../lib/http.js");
 const { setTokens } = await import("../lib/auth.js");
 const { setLocation } = await import("../lib/config.js");
 const { placeOrder, readQuote, orderingFromEnv, QUOTE_TTL_MS, attachPaymentContext } = await import("../lib/order.js");
+const { rememberBrowserContext } = await import("../lib/browser-context.js");
 
 const b64url = (s) => Buffer.from(s).toString("base64url");
 setTokens({ accessToken: `${b64url('{"alg":"HS256"}')}.${b64url(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))}.sig`, refreshToken: "r" });
@@ -212,6 +213,10 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(r.structuredContent.providerCode, 800);
   assert.equal(r.structuredContent.checkoutUrl, "https://wolt.com/en/fin/town/restaurant/soup-place");
   assert.equal(readQuote().paymentResult.code, "payment_declined", "the server retains the outcome");
+  const diagnostics = JSON.parse(readFileSync(join(stateDir, "payment-attempts.json")));
+  assert.equal(diagnostics.at(-1).outcome, "authorization_refused");
+  assert.equal(diagnostics.at(-1).httpStatus, 400);
+  assert.equal(diagnostics.at(-1).errorCode, 800);
   const sent = purchases().length;
   r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
   assert.equal(r.structuredContent.code, "payment_declined");
@@ -355,6 +360,8 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   // response must never turn into "Paid" or an automatic transport retry.
   for (const result of [
     { id: { $oid: "order-challenge" }, status: "received", payment: { authorization: { type: "redirect", data: { url: "https://bank.example/challenge" } } } },
+    { id: { $oid: "order-plan" }, status: "received", payment_plan: { id: "plan1", status: "authorization_required" } },
+    { id: { $oid: "order-plan-unknown" }, status: "received", payment_plan: { id: "plan2" } },
     { id: { $oid: "order-pending" }, status: "pending" },
     { id: { $oid: "order-failed" }, status: "deferred_payment_failed" }
   ]) {
@@ -363,6 +370,11 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
     r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 5718 } });
     assert.equal(JSON.parse(r.content[0].text).ok, false);
   }
+  world.purchaseResult = null;
+  world.purchaseResult = { id: { $oid: "order-plan-paid" }, status: "received", payment_plan: { id: "plan3", status: "authorization_succeeded" } };
+  r = await client.callTool({ name: "prepare_order", arguments: {} });
+  r = await client.callTool({ name: "place_order", arguments: { quote_id: r.structuredContent.quoteId, total: 5718 } });
+  assert.equal(JSON.parse(r.content[0].text).ok, true, "an explicitly authorized payment plan can be reported as paid");
   world.purchaseResult = null;
   for (const failure of ["network", 503]) {
     world.purchaseStatus = failure;
@@ -389,7 +401,7 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   const browserRequired = await connect({ allowed: true, cap: null, paymentSetup: () => "https://mcp.example/payment-context#fixture" });
   r = await browserRequired.client.callTool({ name: "prepare_order", arguments: {} });
   assert.equal(r.structuredContent.paymentContextReady, true, "recent SDK data survives a new quote");
-  assert.equal(r.structuredContent.paymentContextUrl, undefined, "a reprice does not demand another browser visit");
+  assert.match(r.structuredContent.paymentContextUrl, /payment-context#fixture/, "a browser link remains available if the iframe identity must be replaced");
   unlinkSync(join(stateDir, "payment-browser.json"));
   r = await browserRequired.client.callTool({ name: "prepare_order", arguments: {} });
   const browserQuote = r.structuredContent;
@@ -401,12 +413,23 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   assert.equal(purchases().length, beforeBrowser, "remote checkout waits for genuine browser context");
   const tools = (await browserRequired.client.listTools()).tools;
   assert.deepEqual(tools.find(t => t.name === "set_order_payment_context")._meta.ui.visibility, ["app"]);
+  assert.deepEqual(tools.find(t => t.name === "get_order_payment_context")._meta.ui.visibility, ["app"]);
+  const beforePoll = world.calls.length;
+  const state = await browserRequired.client.callTool({ name: "get_order_payment_context", arguments: { quote_id: browserQuote.quoteId, require_browser: true } });
+  assert.equal(JSON.parse(state.content[0].text).ready, false);
+  assert.equal(world.calls.length, beforePoll, "preparation polling never calls Wolt");
   assert.equal(tools.find(t => t.name === "place_order")._meta["openai/widgetAccessible"], true);
   r = await browserRequired.client.callTool({ name: "set_order_payment_context", arguments: { quote_id: browserQuote.quoteId, browser_info: browserInfo, device_id: "real-sdk-context-fixture" } });
   assert.equal(r.isError, undefined, r.content[0].text);
   assert.equal(purchases().length, beforeBrowser, "automatic SDK attachment never pays");
+  let readiness = await browserRequired.client.callTool({ name: "get_order_payment_context", arguments: { quote_id: browserQuote.quoteId, require_browser: true } });
+  assert.equal(JSON.parse(readiness.content[0].text).ready, false, "inline context is not mistaken for preparation in the browser");
+  rememberBrowserContext({ deviceId: "prepared-browser-context", browserInfo }, Date.now(), "browser");
+  readiness = await browserRequired.client.callTool({ name: "get_order_payment_context", arguments: { quote_id: browserQuote.quoteId, require_browser: true } });
+  assert.equal(JSON.parse(readiness.content[0].text).ready, true, "preparation from an older browser link is reusable");
   r = await browserRequired.client.callTool({ name: "place_order", arguments: { quote_id: browserQuote.quoteId, total: 5718 } });
   assert.equal(JSON.parse(r.content[0].text).ok, true);
+  assert.equal(purchases().at(-1)[2].ravelin_device_id, "prepared-browser-context", "a recent browser preparation replaces inline context before submission");
   await browserRequired.close();
 
   // Over the cap the quote still shows, with a warning the card carries.
