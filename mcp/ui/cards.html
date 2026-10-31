@@ -177,6 +177,36 @@
     if (!pay || !status) return;
     var submitting = false;
     var expiresAt = Date.now() + c.expiresInSeconds * 1000;
+    // WebKit embeds may have different/ephemeral device storage from the
+    // in-app browser. Use the browser page there until inline payment is
+    // verified; re-use its preparation rather than replacing it per card.
+    var appleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    var needsBrowser = window.parent !== window && appleMobile && c.paymentContextSource !== "browser" && !!c.paymentContextUrl;
+    function ready() {
+      pay.disabled = false;
+      if (Date.now() >= expiresAt) { pay.textContent = "Refresh total"; status.textContent = "Browser ready. Refresh the total, then confirm the new quote."; }
+      else status.textContent = "Ready. Confirm the total to place this order.";
+      if (fallback) fallback.hidden = true;
+    }
+    function watchBrowserPreparation() {
+      var startedAt = Date.now(), checking = false;
+      async function check() {
+        if (generation !== checkoutGeneration || submitting || checking) return;
+        checking = true;
+        try {
+          var value = await Promise.race([callTool("get_order_payment_context", { quote_id: c.quoteId, require_browser: true }), new Promise(function (_, reject) { setTimeout(function () { reject(new Error("Preparation check timed out")); }, 8000); })]);
+          if (generation !== checkoutGeneration) return;
+          if (value.ready && !value.submitted) { stop(); ready(); }
+        } catch (e) { /* leave the preparation link available */ }
+        finally { checking = false; }
+      }
+      function visible() { if (!document.hidden) check(); }
+      function stop() { clearInterval(timer); window.removeEventListener("focus", check); document.removeEventListener("visibilitychange", visible); }
+      var timer = setInterval(function () { if (generation !== checkoutGeneration || Date.now() - startedAt > 300000) stop(); else if (!document.hidden) check(); }, 5000);
+      window.addEventListener("focus", check);
+      document.addEventListener("visibilitychange", visible);
+      check();
+    }
     pay.onclick = async function () {
       if (submitting || pay.disabled || generation !== checkoutGeneration) return;
       if (Date.now() >= expiresAt && c.repriceArguments) {
@@ -207,6 +237,14 @@
         }
       }
     };
+    if (needsBrowser) {
+      pay.disabled = true;
+      status.textContent = "Open browser preparation once, then return here. This card detects when it is ready; you do not need to type Done.";
+      if (fallback) fallback.hidden = false;
+      watchBrowserPreparation();
+      return;
+    }
+    if (c.paymentContextReady) { ready(); return; }
     if (!c.paymentSdkConfig) {
       pay.disabled = false;
       status.textContent = (c.paymentContextReady || !c.paymentContextUrl) ? "Ready. Confirm the total to place this order." : "Inline preparation is unavailable in this host. Open the fallback link once, then return to this card and confirm the total.";

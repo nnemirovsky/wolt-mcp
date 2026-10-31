@@ -35,6 +35,7 @@ import { getVenue } from "./venue.js";
 import { getAddOnOptions, requireAddOn } from "./add-on.js";
 import { orderWeight, itemAmount } from "./weight.js";
 import { rememberBrowserContext, recentBrowserContext } from "./browser-context.js";
+import { recordPaymentAttempt } from "./payment-diagnostics.js";
 
 const DELIVERY_INFO_URL = "https://restaurant-api.wolt.com/v2/delivery/info";
 const PAYMENT_METHODS_URL = "https://restaurant-api.wolt.com/v3/user/me/payment_methods";
@@ -68,12 +69,22 @@ function writeQuote(q) {
   writeFileSync(quoteFile(), JSON.stringify(q, null, 2), { mode: 0o600 });
 }
 
-export function attachPaymentContext({ quoteId, browserInfo, deviceId }) {
+export function attachPaymentContext({ quoteId, browserInfo, deviceId, source = "inline" }) {
   const quote = readQuote();
   if (!quote || quote.id !== quoteId || quote.expiresAt <= Date.now() || quote.submittedAt) throw new Error("quote expired, replaced or already submitted; prepare a new quote");
-  quote.browserContext = rememberBrowserContext({ browserInfo, deviceId });
+  // Rendering another iframe must not replace a recent prepared identity.
+  // An explicitly opened browser page can replace inline preparation.
+  if (source === "inline" && quote.browserContext) return { ok: true, reused: true };
+  quote.browserContext = rememberBrowserContext({ browserInfo, deviceId }, Date.now(), source);
   writeQuote(quote);
   return { ok: true };
+}
+
+export function paymentContextStatus({ quoteId, requireBrowser = false }) {
+  const quote = readQuote();
+  if (!quote || quote.id !== quoteId) throw new Error("quote replaced; request a fresh quote");
+  const context = [quote.browserContext, recentBrowserContext()].find(c => c && (!requireBrowser || c.source === "browser"));
+  return { ok: true, ready: !!context && !quote.submittedAt, quoteExpired: Date.now() >= quote.expiresAt, submitted: !!quote.submittedAt };
 }
 export function dropQuote() {
   try { unlinkSync(quoteFile()); } catch (e) {}
@@ -292,7 +303,7 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
     rows: checkoutRows(j)
   };
   quote.browserContext = recentBrowserContext();
-  if (paymentSetup && !quote.browserContext) quote.paymentContextUrl = await paymentSetup(quote);
+  if (paymentSetup) quote.paymentContextUrl = await paymentSetup(quote);
   writeQuote(quote);
   return summarize(quote);
 }
@@ -302,6 +313,7 @@ export function summarize(quote) {
     quoteId: quote.id,
     repriceArguments: { venue_id: quote.venue.id, venue_slug: quote.venue.slug, tip: quote.tip, comment: quote.comment, payment_method_id: quote.card.id, address_id: quote.address.id, ...(quote.addOn ? { parent_purchase_id: quote.addOn.parentPurchaseId } : {}) },
     paymentContextReady: !!quote.browserContext,
+    paymentContextSource: quote.browserContext?.source || null,
     ...(quote.paymentContextUrl ? { paymentContextUrl: quote.paymentContextUrl } : {}),
     expiresInSeconds: Math.max(0, Math.round((quote.expiresAt - Date.now()) / 1000)),
     venue: quote.venue.name || quote.venue.slug,
@@ -316,7 +328,7 @@ export function summarize(quote) {
     eta: quote.estimate,
     tip: quote.tip,
     ...(quote.items.some(it => it.weighted_item_info) ? { warnings: ["The total includes Wolt's weight reserve. The final charge can change with the actual picked weight."] } : {}),
-    next: `Show the total, address and card. The checkout card prepares device data automatically and its Confirm and pay button submits this exact quote; the user does not need to type Done. Keep the prose brief and do not create another custom confirmation button below the checkout card. ${quote.paymentContextUrl ? "paymentContextUrl is only a fallback for hosts without working inline preparation; this is our local check, not a rejection by Wolt. " : ""}If the user explicitly confirms the total in chat, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
+    next: `Show the total, address and card. The checkout card reuses recent device preparation or detects when preparation completes, and its Confirm and pay button submits this exact quote; the user does not need to type Done. Keep the prose brief and do not create another custom confirmation button below the checkout card. ${quote.paymentContextUrl ? "paymentContextUrl prepares the browser when the card requests it; completion is detected automatically. This is our local check, not a rejection by Wolt. " : ""}If the user explicitly confirms the total in chat, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
   };
 }
 
@@ -347,9 +359,11 @@ async function submitOrder({ quoteId, total, cap, now }) {
   if (now > quote.expiresAt) { dropQuote(); throw new Error("the quote expired (two minutes); call prepare_order again and re-confirm the total with the user"); }
   if (total !== quote.endAmount) throw new Error(`the total you passed (${total}) is not the quoted ${quote.endAmount} ${quote.venue.currency}; show the user the quote and pass its payableAmount`);
   if (cap != null && quote.endAmount > cap) throw new Error(`this order (${minorToText(quote.endAmount, quote.venue.currency)}) is over the per-order limit set when this connection was approved (${minorToText(cap, quote.venue.currency)})`);
+  const recentContext = recentBrowserContext();
+  if (recentContext?.source === "browser" && quote.browserContext?.source !== "browser") quote.browserContext = recentContext;
   if (quote.paymentContextUrl && !quote.browserContext) {
-    quote.browserContext = recentBrowserContext();
-    if (!quote.browserContext) throw new Error(`Local device preparation is not ready; no purchase request was sent to Wolt. The checkout card prepares it automatically. Use ${quote.paymentContextUrl} only if inline preparation is unavailable. This is not a Wolt payment rejection.`);
+    quote.browserContext = recentContext;
+    if (!quote.browserContext) throw new Error(`Local device preparation is not ready; no purchase request was sent to Wolt. Open ${quote.paymentContextUrl}, then return to the checkout card and confirm. Completion is detected automatically; this is not a Wolt payment rejection.`);
   }
 
   if (quote.addOn) requireAddOn(await getAddOnOptions(quote.addOn.parentPurchaseId), quote.venue.id, quote.address.id);
@@ -412,11 +426,16 @@ async function submitOrder({ quoteId, total, cap, now }) {
   quote.submittedAt = submittedAt;
   delete quote.lastError;
   writeQuote(quote);
+  recordPaymentAttempt(quote, { outcome: "submitted" });
   // A transport retry must not create a second financial operation. An
   // ambiguous outcome stays submitted until the user checks Wolt.
   let r;
   try { r = await woltFetch(PURCHASES_URL, { method: "POST", body, retry: false }); }
-  catch (e) { throw new Error("The payment response was lost. Its outcome is unknown; check your orders in Wolt before ordering again. Do not retry this quote."); }
+  catch (e) {
+    recordPaymentAttempt(quote, { outcome: "unknown" });
+    throw new Error("The payment response was lost. Its outcome is unknown; check your orders in Wolt before ordering again. Do not retry this quote.");
+  }
+  recordPaymentAttempt(quote, { outcome: r.ok ? "unconfirmed" : r.status >= 500 || r.status === 408 ? "unknown" : "http_error", response: r });
   if (!r.ok) {
     // Server errors can happen after a purchase was accepted.
     if (r.status >= 500 || r.status === 408) throw new Error(`Wolt returned HTTP ${r.status}; the payment outcome is unknown. Check your orders in Wolt before ordering again. Do not retry this quote.`);
@@ -425,6 +444,7 @@ async function submitOrder({ quoteId, total, cap, now }) {
     // Error 800 is opaque: it does not identify the bank, provider or risk
     // check that refused authorization. A new quote must not retry it.
     if (r.json?.error_code === 800 || /process card/i.test(r.json?.msg || "")) {
+      recordPaymentAttempt(quote, { outcome: "authorization_refused", response: r });
       quote.declined = true;
       writeQuote(quote);
       // The basket survives a decline; the venue's own link opens it in the
@@ -443,14 +463,22 @@ async function submitOrder({ quoteId, total, cap, now }) {
   const orderId = res.id?.$oid || res.id || res.purchase_id || null;
   const payment = res.payment || r.json?.payment;
   const paymentStatus = payment?.status || res.payment_status || r.json?.payment_status;
-  const requiresAction = !!(payment?.authorization || payment?.authorization_url || res.authorization || r.json?.authorization || /authorization_required|authorization_started/i.test(paymentStatus || ""));
-  if (!orderId && !requiresAction) throw new Error("Wolt returned no order id; the payment outcome is unknown. Check your orders in Wolt before ordering again. Do not retry this quote.");
+  // The web client separately authorizes payment plans after creating the
+  // purchase. An order status of "received" alone does not mean they paid.
+  const paymentPlan = res.payment_plan || r.json?.payment_plan;
+  const requiresAction = !!(payment?.authorization || payment?.authorization_url || res.authorization || r.json?.authorization || /authorization_required|authorization_started/i.test(paymentStatus || "") || (paymentPlan && paymentPlan.status !== "authorization_succeeded"));
+  if (!orderId && !requiresAction) {
+    recordPaymentAttempt(quote, { outcome: "unknown", response: r });
+    throw new Error("Wolt returned no order id; the payment outcome is unknown. Check your orders in Wolt before ordering again. Do not retry this quote.");
+  }
   quote.orderId = orderId || "unknown";
   quote.status = res.status || null;
   writeQuote(quote);
   if (requiresAction || !["received", "confirmed", "production", "ready", "delivered"].includes(res.status) || (paymentStatus && !/^(paid|authorized|authorised|authorization_succeeded|completed|success|succeeded)$/i.test(paymentStatus))) {
+    recordPaymentAttempt(quote, { outcome: requiresAction ? "requires_action" : "unconfirmed", response: r });
     return { ok: false, orderId, status: res.status || null, requiresAction, note: "Payment is not confirmed. Open Wolt to check this order and complete any payment authentication. Do not place a second order." };
   }
+  recordPaymentAttempt(quote, { outcome: "confirmed", response: r });
   return {
     ok: true,
     orderId,

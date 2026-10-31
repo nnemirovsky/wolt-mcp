@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PaymentContextService, paymentSdk, SETUP_LINK_TTL_MS } from "../lib/payment-context.js";
 import { withStateDir } from "../lib/context.js";
 import { recentBrowserContext, BROWSER_CONTEXT_TTL_MS } from "../lib/browser-context.js";
+import { attachPaymentContext, paymentContextStatus } from "../lib/order.js";
 import { serveHttp } from "../lib/remote.js";
 
 const root = mkdtempSync(join(tmpdir(), "wolt-payment-context-"));
@@ -33,7 +34,14 @@ try {
   assert.throws(() => service.complete({ ...payload(token), browserInfo: {} }), /incomplete browser/);
   assert.deepEqual(service.complete(payload(token)), { ok: true });
   assert(!existsSync(service.file(token)), "success consumes the link");
-  assert.deepEqual(JSON.parse(readFileSync(join(account, "order-quote.json"))).browserContext, { browserInfo, deviceId: "opaque-sdk-device" });
+  assert.deepEqual(JSON.parse(readFileSync(join(account, "order-quote.json"))).browserContext, { browserInfo, deviceId: "opaque-sdk-device", source: "browser" });
+  withStateDir(account, () => {
+    const before = readFileSync(join(account, "payment-browser.json"), "utf8");
+    assert.deepEqual(attachPaymentContext({ quoteId: "quote-one", deviceId: "iframe-device", browserInfo }), { ok: true, reused: true });
+    assert.equal(readFileSync(join(account, "payment-browser.json"), "utf8"), before, "iframe cannot replace or extend recent browser preparation");
+    assert.deepEqual(paymentContextStatus({ quoteId: "quote-one", requireBrowser: true }), { ok: true, ready: true, quoteExpired: false, submitted: false });
+    assert.throws(() => paymentContextStatus({ quoteId: "other-quote" }), /quote replaced/);
+  });
   assert(!JSON.parse(readFileSync(join(other, "order-quote.json"))).browserContext, "another account is untouched");
   assert.equal(withStateDir(other, () => recentBrowserContext()), null, "browser cache is account-isolated");
   assert.equal(withStateDir(account, () => recentBrowserContext()).deviceId, "opaque-sdk-device");
@@ -42,6 +50,7 @@ try {
   token = issue({ ...quote(), expiresAt: Date.now() - 1 });
   assert.deepEqual(service.complete(payload(token)), { ok: true, needsFreshQuote: true }, "expired pricing does not invalidate device preparation");
   assert(JSON.parse(readFileSync(join(account, "order-quote.json"))).expiresAt < Date.now(), "device setup cannot extend the price quote");
+  assert.deepEqual(withStateDir(account, () => paymentContextStatus({ quoteId: "quote-one", requireBrowser: true })), { ok: true, ready: true, quoteExpired: true, submitted: false }, "the returning card detects preparation even when its price needs refreshing");
   token = issue(quote());
   const expiredSession = JSON.parse(readFileSync(service.file(token)));
   assert(expiredSession.expiresAt > Date.now() + SETUP_LINK_TTL_MS - 1000);

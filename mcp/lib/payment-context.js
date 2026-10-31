@@ -66,10 +66,10 @@ export class PaymentContextService {
     const result = withStateDir(session.stateDir, () => {
       const quote = readQuote();
       if (quote?.id === session.quoteId && quote.submittedAt) throw new Error("quote already submitted; check the order in Wolt");
-      if (quote?.id === session.quoteId && quote.expiresAt > Date.now()) return attachPaymentContext({ quoteId: session.quoteId, browserInfo, deviceId });
+      if (quote?.id === session.quoteId && quote.expiresAt > Date.now()) return attachPaymentContext({ quoteId: session.quoteId, browserInfo, deviceId, source: "browser" });
       // A reprice must not make the user repeat device preparation. Save the
       // real context, while leaving the expired quote unpayable.
-      rememberBrowserContext({ browserInfo, deviceId });
+      rememberBrowserContext({ browserInfo, deviceId }, Date.now(), "browser");
       return { ok: true, needsFreshQuote: true };
     });
     unlinkSync(this.file(token));
