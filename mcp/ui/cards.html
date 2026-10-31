@@ -143,7 +143,34 @@
     });
   }
   var checkoutGeneration = 0;
+  var paymentResults = {};
+  function publishPaymentResult(c, result) {
+    paymentResults[c.quoteId] = result;
+    var modelContent = JSON.stringify({ quoteId: c.quoteId, paymentResult: result, instruction: "The user already clicked Confirm and pay. This is the result of that attempt; do not ask for another confirmation or resubmit this quote. If payment is unconfirmed, check get_order_history/get_order, not get_baskets, before proposing another purchase." });
+    var o = window.openai;
+    if (o && typeof o.setWidgetState === "function") {
+      try { o.setWidgetState({ modelContent: modelContent, privateContent: { quoteId: c.quoteId, paymentResult: result } }); } catch (e) { /* context sync still works without persistence */ }
+    }
+    request("ui/update-model-context", { content: [{ type: "text", text: modelContent, annotations: { audience: ["assistant"] } }] }).catch(function () { /* older hosts may only support widget state */ });
+  }
+  function rememberedPaymentResult(c) {
+    if (paymentResults[c.quoteId]) return paymentResults[c.quoteId];
+    var saved = window.openai && window.openai.widgetState && window.openai.widgetState.privateContent;
+    return saved && saved.quoteId === c.quoteId && saved.paymentResult && typeof saved.paymentResult.ok === "boolean" ? saved.paymentResult : null;
+  }
+  function showPaymentResult(c, result, publish) {
+    ++checkoutGeneration;
+    var title = result.ok ? "Order placed" : result.code === "payment_declined" ? "Payment not authorized" : "Payment not confirmed";
+    var link = "https://wolt.com";
+    try { var u = new URL(result.checkoutUrl); if (u.protocol === "https:" && (u.hostname === "wolt.com" || u.hostname.endsWith(".wolt.com"))) link = u.href; } catch (e) {}
+    root.innerHTML = '<h2>' + esc(title) + '</h2><p>' + esc(result.venue || c.venue) + '</p>' +
+      (result.ok ? '<p><strong>' + esc(result.total || money(c.payableAmount, c.currency)) + '</strong>' + (result.eta ? ' · ' + esc(result.eta) : '') + '</p>' : '<p class="muted">Quoted total: ' + esc(money(c.payableAmount, c.currency)) + '</p>') +
+      '<p role="status">' + esc(result.note || "Check this order in Wolt before trying again.") + '</p><div class="actions"><button data-act="' + act(function () { open(link); }) + '">Open Wolt</button></div>';
+    if (publish) publishPaymentResult(c, result);
+  }
   function prepareCheckout(c) {
+    var remembered = rememberedPaymentResult(c);
+    if (remembered) { showPaymentResult(c, remembered, false); return; }
     var generation = ++checkoutGeneration;
     var pay = document.getElementById("confirm-pay"), status = document.getElementById("payment-status"), fallback = document.getElementById("payment-fallback");
     if (!pay || !status) return;
@@ -154,7 +181,7 @@
       if (Date.now() >= expiresAt && c.repriceArguments) {
         pay.disabled = true; status.textContent = "Refreshing the total…";
         try { render(await callTool("prepare_order", c.repriceArguments)); }
-        catch (e) { status.textContent = e.message || "Ask for a fresh order quote."; pay.disabled = false; }
+        catch (e) { status.textContent = "Could not refresh this quote. Ask for a fresh quote in chat. No purchase was submitted by this refresh."; pay.disabled = false; }
         return;
       }
       submitting = true; pay.disabled = true; status.textContent = "Submitting your confirmed order…";
@@ -163,19 +190,20 @@
       try {
         var result = await callTool("place_order", { quote_id: c.quoteId, total: c.payableAmount });
         if (generation !== checkoutGeneration) return;
-        if (result.ok) {
-          root.innerHTML = '<h2>Order placed</h2><p>' + esc(result.venue || c.venue) + '</p><p><strong>' + esc(result.total) + '</strong>' + (result.eta ? ' · ' + esc(result.eta) : '') + '</p><p class="note">' + esc(result.note || 'Track your order in Wolt.') + '</p>';
-          return;
-        }
-        status.textContent = result.note || "Payment is not confirmed. Check the order in Wolt before ordering again.";
+        showPaymentResult(c, result, true);
       } catch (e) {
         var message = e.message || "The payment outcome is unknown.";
-        if (/^(Local device preparation|the quote expired|that quote is unknown)/i.test(message)) {
+        if (/Local device preparation|the quote expired|that quote is unknown/i.test(message)) {
           submitting = false; pay.disabled = false;
           if (/the quote expired|that quote is unknown/i.test(message)) { expiresAt = 0; pay.textContent = "Refresh total"; }
-          status.textContent = message;
+          status.textContent = expiresAt === 0 ? "This quote expired. Refresh the total and confirm the new quote." : "Device preparation is not ready. Open the preparation link, then return to this card.";
           if (fallback) fallback.hidden = false;
-        } else status.textContent = message + " Do not submit again without checking the order in Wolt.";
+        } else {
+          // Compatibility with hosts that still wrap old isError responses.
+          // Never put Python/SDK objects or internal exceptions into the card.
+          var declined = /error 800|could not authorize|card was declined|already refused|declined for this quote/i.test(message);
+          showPaymentResult(c, { ok: false, quoteId: c.quoteId, code: declined ? "payment_declined" : "payment_outcome_unknown", retryable: false, note: declined ? "Wolt could not authorize the card payment. Review the attempt in Wolt before choosing another way to pay." : "The payment outcome could not be confirmed. Check your orders in Wolt before placing another order." }, true);
+        }
       }
     };
     if (!c.paymentSdkConfig) {
@@ -375,7 +403,7 @@
         // The same view draws checkout_preview and the order quote from
         // prepare_order (quoteId present): the latter adds where it goes,
         // what pays and the ETA, since the user is about to say yes to it.
-        var c = data, rows = c.rows || [];
+        var c = data, rows = (c.rows || []).filter(function (row) { return c.payableAmount == null || !row.isTotal; });
         html = "<h2>" + (c.quoteId ? "Order quote" : "Checkout") + "</h2>" +
           (c.quoteId ? '<div class="muted">' + [c.venue ? esc(c.venue) : "", c.deliveryTo ? "to " + esc(c.deliveryTo) : "", c.paidWith ? "card " + esc(c.paidWith) : "", c.eta ? "ETA " + esc(c.eta) : ""].filter(Boolean).join(" · ") + "</div>" : "") +
           "<table>" + rows.map(function (r) { return "<tr><td>" + esc(r.label || r.name || r.type) + "</td><td>" + esc(r.formatted || money(r.amount, c.currency)) + "</td></tr>"; }).join("") +

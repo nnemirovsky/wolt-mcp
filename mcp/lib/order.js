@@ -48,6 +48,18 @@ const placing = new Set();
 
 const minorToText = (amount, currency) => `${(amount / 100).toFixed(2)} ${currency}`;
 
+// Authorization refusal is a business outcome, not a broken MCP invocation.
+// Returning it as isError makes some hosts expose a RuntimeException wrapper.
+export class PaymentRefusal extends Error {
+  constructor({ quoteId, checkoutUrl = null, alreadyRefused = false, providerCode = 800 }) {
+    const note = alreadyRefused
+      ? "This quoted card payment was already refused. Do not retry this quote. Review the attempt in Wolt before choosing another way to pay."
+      : "Wolt could not authorize the saved card payment. It did not provide a detailed reason. Do not retry from here; review the attempt in Wolt or choose another card.";
+    super(note);
+    this.result = { ok: false, quoteId, status: "payment_declined", code: "payment_declined", providerCode, retryable: false, note, checkoutUrl };
+  }
+}
+
 export function readQuote() {
   try { return JSON.parse(readFileSync(quoteFile(), "utf8")); } catch (e) { return null; }
 }
@@ -304,7 +316,7 @@ export function summarize(quote) {
     eta: quote.estimate,
     tip: quote.tip,
     ...(quote.items.some(it => it.weighted_item_info) ? { warnings: ["The total includes Wolt's weight reserve. The final charge can change with the actual picked weight."] } : {}),
-    next: `Show the total, address and card. The checkout card prepares device data automatically and its Confirm and pay button submits this exact quote; the user does not need to type Done. ${quote.paymentContextUrl ? "paymentContextUrl is only a fallback for hosts without working inline preparation; this is our local check, not a rejection by Wolt. " : ""}If the user explicitly confirms the total in chat, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
+    next: `Show the total, address and card. The checkout card prepares device data automatically and its Confirm and pay button submits this exact quote; the user does not need to type Done. Keep the prose brief and do not create another custom confirmation button below the checkout card. ${quote.paymentContextUrl ? "paymentContextUrl is only a fallback for hosts without working inline preparation; this is our local check, not a rejection by Wolt. " : ""}If the user explicitly confirms the total in chat, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
   };
 }
 
@@ -329,7 +341,7 @@ export async function placeOrder({ quoteId, total, cap = null, now = Date.now() 
 async function submitOrder({ quoteId, total, cap, now }) {
   const quote = readQuote();
   if (!quote || quote.id !== quoteId) throw new Error("that quote is unknown or was replaced; call prepare_order again");
-  if (quote.declined) throw new Error("the card was declined for this quote; do not retry from here, the user should pay in the Wolt app or with another card");
+  if (quote.declined) throw new PaymentRefusal({ quoteId: quote.id, checkoutUrl: quote.checkoutUrl || null, alreadyRefused: true });
   if (quote.orderId) throw new Error(`this quote was already submitted (order ${quote.orderId}); check it in Wolt instead of submitting it again`);
   if (quote.submittedAt && !quote.lastError) throw new Error("the previous payment attempt has an unknown outcome; check the order in Wolt before making another purchase; do not retry this quote");
   if (now > quote.expiresAt) { dropQuote(); throw new Error("the quote expired (two minutes); call prepare_order again and re-confirm the total with the user"); }
@@ -419,7 +431,11 @@ async function submitOrder({ quoteId, total, cap, now }) {
       // Wolt app ("Continue order?"), where the payment usually goes through.
       let link = null;
       try { link = (await getVenue(quote.venue.slug)).shareUrl || null; } catch (e) { /* the message still stands without it */ }
-      throw new Error(`Wolt could not authorize the card payment (error 800: "${r.json?.msg || "Failed to process card"}"). The response does not say whether the bank, payment provider or Wolt refused it. Do not retry from here. Give the user ${link ? `this link, which opens it in the Wolt app: ${link}` : "the Wolt app"} to review the attempt and complete any required authentication or choose another card.`);
+      const refusal = new PaymentRefusal({ quoteId: quote.id, checkoutUrl: link, providerCode: r.json?.error_code ?? 800 });
+      quote.checkoutUrl = link;
+      quote.paymentResult = refusal.result;
+      writeQuote(quote);
+      throw refusal;
     }
     throw new Error(`Wolt refused the purchase: ${quote.lastError}. The same quote can be retried once if this looks transient; otherwise order on wolt.com`);
   }

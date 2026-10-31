@@ -151,11 +151,12 @@ export async function loadBasketPlan({ venueId, venueSlug = null, lat, lon, coun
 export function checkoutRows(j) {
   return (j.checkout_rows || []).map((row) => {
     // observed live: row.amount is { amount, formatted_amount, reason }
-    const a = row.amount_row?.amount ?? row.price_total_amount_row?.amount ?? row.amount;
+    const a = row.amount_row?.amount ?? row.price_total_amount_row?.amount ?? row.price_total_amount ?? row.amount;
     return {
       label: row.label || row.title || null,
       amount: typeof a === "number" ? a : a?.amount ?? null,
-      formatted: a?.formatted_amount ?? null
+      formatted: a?.formatted_amount ?? null,
+      ...(row.template === "price_total_amount_row" || row.price_total_amount != null || row.price_total_amount_row != null ? { isTotal: true } : {})
     };
   }).filter((r) => r.label || r.amount != null);
 }
