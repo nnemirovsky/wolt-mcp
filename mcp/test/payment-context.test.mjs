@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, statSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PaymentContextService, paymentSdk } from "../lib/payment-context.js";
+import { PaymentContextService, paymentSdk, SETUP_LINK_TTL_MS } from "../lib/payment-context.js";
 import { withStateDir } from "../lib/context.js";
+import { recentBrowserContext, BROWSER_CONTEXT_TTL_MS } from "../lib/browser-context.js";
 import { serveHttp } from "../lib/remote.js";
 
 const root = mkdtempSync(join(tmpdir(), "wolt-payment-context-"));
@@ -34,12 +35,22 @@ try {
   assert(!existsSync(service.file(token)), "success consumes the link");
   assert.deepEqual(JSON.parse(readFileSync(join(account, "order-quote.json"))).browserContext, { browserInfo, deviceId: "opaque-sdk-device" });
   assert(!JSON.parse(readFileSync(join(other, "order-quote.json"))).browserContext, "another account is untouched");
+  assert.equal(withStateDir(other, () => recentBrowserContext()), null, "browser cache is account-isolated");
+  assert.equal(withStateDir(account, () => recentBrowserContext()).deviceId, "opaque-sdk-device");
+  assert.equal(withStateDir(account, () => recentBrowserContext(Date.now() + BROWSER_CONTEXT_TTL_MS + 1)), null, "a stale device context is not reused");
   assert.throws(() => service.complete(payload(token)), /invalid or expired/);
   token = issue({ ...quote(), expiresAt: Date.now() - 1 });
+  assert.deepEqual(service.complete(payload(token)), { ok: true, needsFreshQuote: true }, "expired pricing does not invalidate device preparation");
+  assert(JSON.parse(readFileSync(join(account, "order-quote.json"))).expiresAt < Date.now(), "device setup cannot extend the price quote");
+  token = issue(quote());
+  const expiredSession = JSON.parse(readFileSync(service.file(token)));
+  assert(expiredSession.expiresAt > Date.now() + SETUP_LINK_TTL_MS - 1000);
+  writeFileSync(service.file(token), JSON.stringify({ ...expiredSession, expiresAt: Date.now() - 1 }));
   assert.throws(() => service.complete(payload(token)), /expired/);
   token = issue(quote());
   save(account, { ...quote(), id: "replacement" });
-  assert.throws(() => service.complete(payload(token)), /replaced/);
+  assert.deepEqual(service.complete(payload(token)), { ok: true, needsFreshQuote: true });
+  assert.equal(JSON.parse(readFileSync(join(account, "order-quote.json"))).id, "replacement", "old setup cannot replace a newer quote");
   token = issue({ ...quote(), submittedAt: Date.now() });
   assert.throws(() => service.complete(payload(token)), /already submitted/);
 

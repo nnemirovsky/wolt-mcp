@@ -217,7 +217,10 @@ export async function serveHttp({ buildServer, version, port, host, env = proces
     // approve page (scope "order" and the cap); fixed API tokens and the
     // no-auth mode fall back to the operator's environment.
     const ordering = grant ? { allowed: /\border\b/.test(grant.scope || ""), cap: grant.orderCap ?? null } : orderingFromEnv(env);
-    if (cfg.publicUrl) ordering.paymentSetup = (quote) => paymentContext.issue(quote);
+    if (cfg.publicUrl) {
+      ordering.paymentSetup = (quote) => paymentContext.issue(quote);
+      ordering.paymentSdkConfig = () => paymentContext.config();
+    }
     await withStateDir(stateDir, async () => {
       const mcpServer = buildServer({ remote: true, ordering });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

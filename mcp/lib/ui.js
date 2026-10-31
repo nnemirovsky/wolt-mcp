@@ -13,6 +13,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+export const PAYMENT_HOSTS = ["https://*.ravelin.click"];
 
 export const UI_RESOURCE_URI = "ui://wolt-mcp/cards.html";
 export const UI_MIME = "text/html;profile=mcp-app";
@@ -24,7 +28,10 @@ export const IMAGE_HOSTS = ["https://imageproxy.wolt.com", "https://wolt.com", "
 const HTML_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "ui", "cards.html");
 let html = null;
 export function widgetHtml() {
-  if (html === null) html = readFileSync(HTML_PATH, "utf8");
+  if (html === null) {
+    const sdk = readFileSync(require.resolve("ravelinjs/core"), "utf8").replace(/<\/script/gi, "<\\/script");
+    html = readFileSync(HTML_PATH, "utf8").replace("<!-- PAYMENT_SDK -->", `<script>${sdk}</script>`);
+  }
   return html;
 }
 
@@ -76,16 +83,17 @@ export function uiMeta(toolName) {
   return {
     ui: { resourceUri: UI_RESOURCE_URI },
     "openai/outputTemplate": UI_RESOURCE_URI,
+    ...(toolName === "prepare_order" ? { "openai/widgetAccessible": true } : {}),
     "openai/toolInvocation/invoking": status[0],
     "openai/toolInvocation/invoked": status[1]
   };
 }
 
 const resourceMeta = {
-  ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: IMAGE_HOSTS } },
+  ui: { prefersBorder: true, csp: { connectDomains: PAYMENT_HOSTS, resourceDomains: IMAGE_HOSTS } },
   "openai/widgetDescription": "Wolt products, dishes, venues and your cart, with pictures, prices and ratings.",
   "openai/widgetPrefersBorder": true,
-  "openai/widgetCSP": { connect_domains: [], resource_domains: IMAGE_HOSTS }
+  "openai/widgetCSP": { connect_domains: PAYMENT_HOSTS, resource_domains: IMAGE_HOSTS }
 };
 
 export function registerUi(server) {

@@ -26,8 +26,10 @@
   .chip{font-size:11px;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--fg)}
   .chip.ok{color:var(--ok)}.chip.warn{color:var(--warn)}
   .actions{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+  .actions[hidden]{display:none}
   button{font:inherit;font-size:12px;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.55;cursor:default}
   .hero{width:100%;aspect-ratio:16/7;object-fit:cover;border-radius:12px;background:var(--chip);display:block;margin-bottom:10px}
   table{width:100%;border-collapse:collapse}
   td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top}
@@ -40,6 +42,7 @@
 </head>
 <body>
 <div id="root" class="muted">Loading…</div>
+<!-- PAYMENT_SDK -->
 <script>
 (function () {
   "use strict";
@@ -53,9 +56,9 @@
   var nextId = 1, pending = {};
   function send(msg) { try { window.parent.postMessage(msg, "*"); } catch (e) {} }
   function request(method, params) {
-    return new Promise(function (resolve) {
+    return new Promise(function (resolve, reject) {
       var id = nextId++;
-      pending[id] = resolve;
+      pending[id] = { resolve: resolve, reject: reject };
       send({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
     });
   }
@@ -63,8 +66,9 @@
   var hostContext = {};
   window.addEventListener("message", function (ev) {
     var m = ev.data;
+    if (ev.source !== window.parent) return;
     if (!m || m.jsonrpc !== "2.0") return;
-    if (m.id != null && pending[m.id]) { var r = pending[m.id]; delete pending[m.id]; r(m.result || {}); return; }
+    if (m.id != null && pending[m.id]) { var r = pending[m.id]; delete pending[m.id]; if (m.error) r.reject(new Error(m.error.message || "Host tool call failed")); else r.resolve(m.result || {}); return; }
     if (m.method === "ui/notifications/tool-result" && m.params) render(m.params.structuredContent);
     else if (m.method === "ui/notifications/host-context-changed" && m.params) applyContext(m.params);
   });
@@ -125,7 +129,81 @@
   }
   function open(url) {
     if (window.openai && window.openai.openExternal) return window.openai.openExternal({ href: url });
-    request("ui/open-link", { url: url }).then(function (r) { if (r && r.isError) window.open(url, "_blank", "noopener"); });
+    request("ui/open-link", { url: url }).then(function (r) { if (r && r.isError) window.open(url, "_blank", "noopener"); }).catch(function () { window.open(url, "_blank", "noopener"); });
+  }
+  function callTool(name, args) {
+    var o = window.openai;
+    var result = o && typeof o.callTool === "function" ? o.callTool(name, args) : request("tools/call", { name: name, arguments: args });
+    return Promise.resolve(result).then(function (r) {
+      if (r && r.isError) throw new Error((r.content || []).map(function (c) { return c.text || ""; }).join(" ") || "Tool call failed");
+      if (r && r.structuredContent) return r.structuredContent;
+      var text = (r && r.content || []).find(function (c) { return c.type === "text"; });
+      if (text) { try { return JSON.parse(text.text); } catch (e) { throw new Error(text.text); } }
+      throw new Error("The host returned no tool result");
+    });
+  }
+  var checkoutGeneration = 0;
+  function prepareCheckout(c) {
+    var generation = ++checkoutGeneration;
+    var pay = document.getElementById("confirm-pay"), status = document.getElementById("payment-status"), fallback = document.getElementById("payment-fallback");
+    if (!pay || !status) return;
+    var submitting = false;
+    var expiresAt = Date.now() + c.expiresInSeconds * 1000;
+    pay.onclick = async function () {
+      if (submitting || pay.disabled || generation !== checkoutGeneration) return;
+      if (Date.now() >= expiresAt && c.repriceArguments) {
+        pay.disabled = true; status.textContent = "Refreshing the total…";
+        try { render(await callTool("prepare_order", c.repriceArguments)); }
+        catch (e) { status.textContent = e.message || "Ask for a fresh order quote."; pay.disabled = false; }
+        return;
+      }
+      submitting = true; pay.disabled = true; status.textContent = "Submitting your confirmed order…";
+      // Only this explicit button click can submit. SDK preparation never
+      // calls place_order, and a failed/ambiguous submission is never retried.
+      try {
+        var result = await callTool("place_order", { quote_id: c.quoteId, total: c.payableAmount });
+        if (generation !== checkoutGeneration) return;
+        if (result.ok) {
+          root.innerHTML = '<h2>Order placed</h2><p>' + esc(result.venue || c.venue) + '</p><p><strong>' + esc(result.total) + '</strong>' + (result.eta ? ' · ' + esc(result.eta) : '') + '</p><p class="note">' + esc(result.note || 'Track your order in Wolt.') + '</p>';
+          return;
+        }
+        status.textContent = result.note || "Payment is not confirmed. Check the order in Wolt before ordering again.";
+      } catch (e) {
+        var message = e.message || "The payment outcome is unknown.";
+        if (/^(Local device preparation|the quote expired|that quote is unknown)/i.test(message)) {
+          submitting = false; pay.disabled = false;
+          if (/the quote expired|that quote is unknown/i.test(message)) { expiresAt = 0; pay.textContent = "Refresh total"; }
+          status.textContent = message;
+          if (fallback) fallback.hidden = false;
+        } else status.textContent = message + " Do not submit again without checking the order in Wolt.";
+      }
+    };
+    if (!c.paymentSdkConfig) {
+      pay.disabled = false;
+      status.textContent = (c.paymentContextReady || !c.paymentContextUrl) ? "Ready. Confirm the total to place this order." : "Inline preparation is unavailable in this host. Open the fallback link once, then return to this card and confirm the total.";
+      if (fallback) fallback.hidden = !!c.paymentContextReady;
+      return;
+    }
+    pay.disabled = true;
+    status.textContent = "Preparing your saved card…";
+    (async function () {
+      try {
+        var rav = new Ravelin({ key: c.paymentSdkConfig.publicKey });
+        var deviceId = await Promise.race([rav.core.id(), new Promise(function (_, reject) { setTimeout(function () { reject(new Error("Device preparation timed out")); }, 12000); })]);
+        var value = await Promise.race([callTool("set_order_payment_context", { quote_id: c.quoteId, device_id: deviceId, browser_info: { color_depth: screen.colorDepth, java_enabled: navigator.javaEnabled ? navigator.javaEnabled() : false, language: navigator.language, screen_height: screen.height, screen_width: screen.width, time_zone_offset: new Date().getTimezoneOffset(), user_agent: navigator.userAgent } }), new Promise(function (_, reject) { setTimeout(function () { reject(new Error("Host did not confirm device preparation")); }, 15000); })]);
+        if (generation !== checkoutGeneration) return;
+        if (!value.ok) throw new Error("Could not prepare this quote");
+        pay.disabled = false;
+        status.textContent = "Ready. Confirm the total to place this order.";
+      } catch (e) {
+        if (generation !== checkoutGeneration) return;
+        // The external fallback saves context server-side. Keep this explicit
+        // confirmation usable after returning; place_order checks readiness.
+        pay.disabled = !c.paymentContextReady && !c.paymentContextUrl;
+        status.textContent = c.paymentContextReady ? "Using your recent browser preparation. Confirm the total to place this order." : "Inline preparation is unavailable. Open the fallback link once, then return to this card and confirm the total. You do not need to repeat setup for a refreshed quote.";
+        if (fallback) fallback.hidden = !!c.paymentContextReady;
+      }
+    })();
   }
   if (window.ResizeObserver) new ResizeObserver(function () {
     notify("ui/notifications/size-changed", { height: document.documentElement.scrollHeight });
@@ -187,7 +265,7 @@
 
   function render(data) {
     if (!data || typeof data !== "object") return;
-    try { root.innerHTML = draw(data); root.className = ""; rendered = true; }
+    try { root.innerHTML = draw(data); root.className = ""; rendered = true; if (data.view === "checkout" && data.quoteId) prepareCheckout(data); }
     catch (e) {
       // A drawing bug must not hide the result: fall back to the raw data.
       root.className = "";
@@ -299,15 +377,16 @@
         // what pays and the ETA, since the user is about to say yes to it.
         var c = data, rows = c.rows || [];
         html = "<h2>" + (c.quoteId ? "Order quote" : "Checkout") + "</h2>" +
-          (c.quoteId ? '<div class="muted">' + [c.venue ? esc(c.venue) : "", c.deliveryTo ? "to " + esc(c.deliveryTo) : "", c.paidWith ? "paid with " + esc(c.paidWith) : "", c.eta ? "ETA " + esc(c.eta) : ""].filter(Boolean).join(" · ") + "</div>" : "") +
+          (c.quoteId ? '<div class="muted">' + [c.venue ? esc(c.venue) : "", c.deliveryTo ? "to " + esc(c.deliveryTo) : "", c.paidWith ? "card " + esc(c.paidWith) : "", c.eta ? "ETA " + esc(c.eta) : ""].filter(Boolean).join(" · ") + "</div>" : "") +
           "<table>" + rows.map(function (r) { return "<tr><td>" + esc(r.label || r.name || r.type) + "</td><td>" + esc(r.formatted || money(r.amount, c.currency)) + "</td></tr>"; }).join("") +
           (c.payableAmount != null ? '<tr class="total"><td>Total</td><td>' + esc(c.payableAmountFormatted || money(c.payableAmount, c.currency)) + "</td></tr>" : "") + "</table>" +
           (c.checkoutUrl ? '<div class="actions"><button class="primary" data-act="' + act(function () { open(c.checkoutUrl); }) + '">Pay on Wolt</button></div>' : "") +
           (c.warnings && c.warnings.length ? '<div class="note">' + esc(c.warnings.join(" ")) + "</div>" : "") +
           (c.warning ? '<div class="note">' + esc(c.warning) + "</div>" : "") +
-          (c.paymentContextUrl ? '<div class="actions"><button class="primary" data-act="' + act(function () { open(c.paymentContextUrl); }) + '">Prepare card payment</button></div><div class="note">Prepare payment in your browser, then return here to confirm the total.</div>' : "") +
+          (c.quoteId ? '<div class="actions"><button id="confirm-pay" class="primary" disabled>Confirm and pay ' + esc(money(c.payableAmount, c.currency)) + '</button></div><div id="payment-status" class="note" role="status"></div>' : "") +
+          (c.paymentContextUrl ? '<div id="payment-fallback" class="actions" hidden><button data-act="' + act(function () { open(c.paymentContextUrl); }) + '">Open payment preparation</button></div>' : "") +
           (c.deliveryDisclaimer ? '<div class="note">' + esc(c.deliveryDisclaimer) + '</div>' : "") +
-          (c.quoteId ? '<div class="note">Nothing is ordered yet. Confirm the total in the chat to place it.</div>' : "");
+          (c.quoteId ? '<div class="note">Nothing is ordered until you confirm. Device data is sent to Ravelin for payment protection.</div>' : "");
         break;
       }
       default:
@@ -319,7 +398,7 @@
   // ---- kick-off, after every declaration above exists: ChatGPT's data is
   // already in window.openai when this runs, so the first render is now.
   request("ui/initialize", { appInfo: { name: "wolt-mcp", version: "1" }, appCapabilities: {}, protocolVersion: PROTOCOL })
-    .then(function (res) { applyContext(res.hostContext || {}); notify("ui/notifications/initialized", {}); });
+    .then(function (res) { applyContext(res.hostContext || {}); notify("ui/notifications/initialized", {}); }).catch(function () { /* the compatibility bridge may still work */ });
   window.addEventListener("openai:set_globals", fromOpenAI);
   fromOpenAI();
   // Poll for late data, and never leave a silent "Loading…": after a few

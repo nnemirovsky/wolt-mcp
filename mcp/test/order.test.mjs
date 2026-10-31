@@ -3,7 +3,7 @@
 // protects the user's money (total mismatch, cap, expiry, price drift,
 // unknown option picks, consents, double spend) and the exact purchase payload.
 import assert from "node:assert";
-import { mkdtempSync, statSync, existsSync } from "node:fs";
+import { mkdtempSync, statSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -382,14 +382,23 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   await close();
   const browserRequired = await connect({ allowed: true, cap: null, paymentSetup: () => "https://mcp.example/payment-context#fixture" });
   r = await browserRequired.client.callTool({ name: "prepare_order", arguments: {} });
+  assert.equal(r.structuredContent.paymentContextReady, true, "recent SDK data survives a new quote");
+  assert.equal(r.structuredContent.paymentContextUrl, undefined, "a reprice does not demand another browser visit");
+  unlinkSync(join(stateDir, "payment-browser.json"));
+  r = await browserRequired.client.callTool({ name: "prepare_order", arguments: {} });
   const browserQuote = r.structuredContent;
   assert.equal(browserQuote.paymentContextReady, false);
   assert.match(browserQuote.paymentContextUrl, /payment-context#fixture/);
   const beforeBrowser = purchases().length;
   r = await browserRequired.client.callTool({ name: "place_order", arguments: { quote_id: browserQuote.quoteId, total: 5718 } });
-  assert.match(r.content[0].text, /prepare payment in your browser/);
+  assert.match(r.content[0].text, /Local device preparation.*no purchase request was sent to Wolt/);
   assert.equal(purchases().length, beforeBrowser, "remote checkout waits for genuine browser context");
-  attachPaymentContext({ quoteId: browserQuote.quoteId, browserInfo, deviceId: "real-sdk-context-fixture" });
+  const tools = (await browserRequired.client.listTools()).tools;
+  assert.deepEqual(tools.find(t => t.name === "set_order_payment_context")._meta.ui.visibility, ["app"]);
+  assert.equal(tools.find(t => t.name === "place_order")._meta["openai/widgetAccessible"], true);
+  r = await browserRequired.client.callTool({ name: "set_order_payment_context", arguments: { quote_id: browserQuote.quoteId, browser_info: browserInfo, device_id: "real-sdk-context-fixture" } });
+  assert.equal(r.isError, undefined, r.content[0].text);
+  assert.equal(purchases().length, beforeBrowser, "automatic SDK attachment never pays");
   r = await browserRequired.client.callTool({ name: "place_order", arguments: { quote_id: browserQuote.quoteId, total: 5718 } });
   assert.equal(JSON.parse(r.content[0].text).ok, true);
   await browserRequired.close();

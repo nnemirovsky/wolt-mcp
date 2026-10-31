@@ -34,6 +34,7 @@ import { currentStateDir } from "./context.js";
 import { getVenue } from "./venue.js";
 import { getAddOnOptions, requireAddOn } from "./add-on.js";
 import { orderWeight, itemAmount } from "./weight.js";
+import { rememberBrowserContext, recentBrowserContext } from "./browser-context.js";
 
 const DELIVERY_INFO_URL = "https://restaurant-api.wolt.com/v2/delivery/info";
 const PAYMENT_METHODS_URL = "https://restaurant-api.wolt.com/v3/user/me/payment_methods";
@@ -58,10 +59,7 @@ function writeQuote(q) {
 export function attachPaymentContext({ quoteId, browserInfo, deviceId }) {
   const quote = readQuote();
   if (!quote || quote.id !== quoteId || quote.expiresAt <= Date.now() || quote.submittedAt) throw new Error("quote expired, replaced or already submitted; prepare a new quote");
-  if (typeof deviceId !== "string" || !deviceId.length || deviceId.length > 512) throw new Error("missing SDK device id");
-  const b = browserInfo || {};
-  if (![b.color_depth, b.screen_height, b.screen_width, b.time_zone_offset].every(Number.isSafeInteger) || b.color_depth <= 0 || b.screen_height <= 0 || b.screen_width <= 0 || Math.abs(b.time_zone_offset) > 1440 || typeof b.java_enabled !== "boolean" || typeof b.language !== "string" || !b.language || b.language.length > 80 || typeof b.user_agent !== "string" || !b.user_agent || b.user_agent.length > 2000) throw new Error("incomplete browser payment information");
-  quote.browserContext = { deviceId, browserInfo: { color_depth: b.color_depth, java_enabled: b.java_enabled, language: b.language, screen_height: b.screen_height, screen_width: b.screen_width, time_zone_offset: b.time_zone_offset, user_agent: b.user_agent } };
+  quote.browserContext = rememberBrowserContext({ browserInfo, deviceId });
   writeQuote(quote);
   return { ok: true };
 }
@@ -281,7 +279,8 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
     card: { id: card.id, title: card.title, number: card.number },
     rows: checkoutRows(j)
   };
-  if (paymentSetup) quote.paymentContextUrl = await paymentSetup(quote);
+  quote.browserContext = recentBrowserContext();
+  if (paymentSetup && !quote.browserContext) quote.paymentContextUrl = await paymentSetup(quote);
   writeQuote(quote);
   return summarize(quote);
 }
@@ -289,7 +288,9 @@ export async function prepareOrder({ venueId = null, venueSlug = null, lat, lon,
 export function summarize(quote) {
   return {
     quoteId: quote.id,
-    ...(quote.paymentContextUrl ? { paymentContextUrl: quote.paymentContextUrl, paymentContextReady: !!quote.browserContext } : {}),
+    repriceArguments: { venue_id: quote.venue.id, venue_slug: quote.venue.slug, tip: quote.tip, comment: quote.comment, payment_method_id: quote.card.id, address_id: quote.address.id, ...(quote.addOn ? { parent_purchase_id: quote.addOn.parentPurchaseId } : {}) },
+    paymentContextReady: !!quote.browserContext,
+    ...(quote.paymentContextUrl ? { paymentContextUrl: quote.paymentContextUrl } : {}),
     expiresInSeconds: Math.max(0, Math.round((quote.expiresAt - Date.now()) / 1000)),
     venue: quote.venue.name || quote.venue.slug,
     items: quote.items.map((it) => ({ name: it.name[0].value, count: it.count, price: it.baseprice, endAmount: it.end_amount, ...(it.weighted_item_info ? { grams: it.weighted_item_info.purchased_weight_in_grams, pricePerKg: it.weighted_item_info.price_per_kg } : {}), ...(it.options.length ? { options: optionsText(it.options), priceWithOptions: it.end_amount / it.count } : {}) })),
@@ -303,7 +304,7 @@ export function summarize(quote) {
     eta: quote.estimate,
     tip: quote.tip,
     ...(quote.items.some(it => it.weighted_item_info) ? { warnings: ["The total includes Wolt's weight reserve. The final charge can change with the actual picked weight."] } : {}),
-    next: `${quote.paymentContextUrl ? "Give the user paymentContextUrl to prepare payment in their browser first (it does not charge). " : ""}Show the user the total, the address and the card. If they confirm, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
+    next: `Show the total, address and card. The checkout card prepares device data automatically and its Confirm and pay button submits this exact quote; the user does not need to type Done. ${quote.paymentContextUrl ? "paymentContextUrl is only a fallback for hosts without working inline preparation; this is our local check, not a rejection by Wolt. " : ""}If the user explicitly confirms the total in chat, call place_order with quote_id "${quote.id}" and total ${quote.endAmount}.`
   };
 }
 
@@ -334,7 +335,10 @@ async function submitOrder({ quoteId, total, cap, now }) {
   if (now > quote.expiresAt) { dropQuote(); throw new Error("the quote expired (two minutes); call prepare_order again and re-confirm the total with the user"); }
   if (total !== quote.endAmount) throw new Error(`the total you passed (${total}) is not the quoted ${quote.endAmount} ${quote.venue.currency}; show the user the quote and pass its payableAmount`);
   if (cap != null && quote.endAmount > cap) throw new Error(`this order (${minorToText(quote.endAmount, quote.venue.currency)}) is over the per-order limit set when this connection was approved (${minorToText(cap, quote.venue.currency)})`);
-  if (quote.paymentContextUrl && !quote.browserContext) throw new Error(`Open ${quote.paymentContextUrl} and prepare payment in your browser, then return here to confirm this quote's total. Nothing was charged.`);
+  if (quote.paymentContextUrl && !quote.browserContext) {
+    quote.browserContext = recentBrowserContext();
+    if (!quote.browserContext) throw new Error(`Local device preparation is not ready; no purchase request was sent to Wolt. The checkout card prepares it automatically. Use ${quote.paymentContextUrl} only if inline preparation is unavailable. This is not a Wolt payment rejection.`);
+  }
 
   if (quote.addOn) requireAddOn(await getAddOnOptions(quote.addOn.parentPurchaseId), quote.venue.id, quote.address.id);
 
