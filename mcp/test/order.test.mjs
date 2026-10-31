@@ -114,6 +114,7 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   const q = r.structuredContent;
   assert.equal(q.view, "checkout", "the quote draws the checkout card");
   assert.equal(q.payableAmount, 5718);
+  assert.equal(q.rows.find(row => row.isTotal).amount, 5718, "Wolt's top-level price_total_amount is decoded, not left blank");
   assert.equal(q.currency, "EUR");
   assert.match(q.deliveryTo, /Home/);
   assert.match(q.paidWith, /Visa/);
@@ -205,11 +206,16 @@ const purchases = () => world.calls.filter((c) => c[1].endsWith("/v2/purchases")
   r = await client.callTool({ name: "prepare_order", arguments: {} });
   const qd = r.structuredContent;
   r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
-  assert.match(r.content[0].text, /could not authorize.*does not say whether.*Do not retry/s);
-  assert.match(r.content[0].text, /opens it in the Wolt app: https:\/\/wolt\.com\/en\/fin\/town\/restaurant\/soup-place/, "the decline hands over the venue link that restores the basket in the app");
+  assert.equal(r.isError, undefined, "a refusal is a structured payment outcome, not a host RuntimeException");
+  assert.equal(r.structuredContent.code, "payment_declined");
+  assert.equal(r.structuredContent.retryable, false);
+  assert.equal(r.structuredContent.providerCode, 800);
+  assert.equal(r.structuredContent.checkoutUrl, "https://wolt.com/en/fin/town/restaurant/soup-place");
+  assert.equal(readQuote().paymentResult.code, "payment_declined", "the server retains the outcome");
   const sent = purchases().length;
   r = await client.callTool({ name: "place_order", arguments: { quote_id: qd.quoteId, total: 5718 } });
-  assert.match(r.content[0].text, /declined for this quote/);
+  assert.equal(r.structuredContent.code, "payment_declined");
+  assert.match(r.structuredContent.note, /already refused.*Do not retry/s);
   assert.equal(purchases().length, sent, "a declined quote is not sent again");
   world.purchaseStatus = 200;
 
