@@ -6,7 +6,7 @@
 <style>body{font:17px system-ui;max-width:34rem;margin:12vh auto;padding:24px;line-height:1.5;color:#20252b;background:#f7fbfc}button{font:inherit;border:0;border-radius:24px;padding:12px 24px;background:#009de0;color:white;cursor:pointer}button:disabled{opacity:.6}#status{margin-top:20px}</style>
 <h1>Prepare your card payment</h1>
 <p>Use this browser's device information for your Wolt order. Wolt's Ravelin SDK sends device data to its payment protection service.</p>
-<p>This does not place an order or charge your card. Return to the chat afterward to confirm your quoted total.</p>
+<p>Preparation starts automatically. This does not place an order or charge your card. Return to the checkout card afterward and choose Confirm and pay; you do not need to type Done.</p>
 <button id="prepare">Prepare payment</button>
 <p id="status" role="status"></p>
 <script src="/payment-context/sdk.js"></script>
@@ -23,6 +23,7 @@
     button.disabled = false;
     button.textContent = "Prepare payment";
     status.textContent = "";
+    queueMicrotask(() => button.click());
   }
   window.addEventListener("hashchange", receiveLink);
   receiveLink();
@@ -42,7 +43,7 @@
       const result = await response.json();
       if (!response.ok) throw Error(result.error);
       if (activeToken !== token) return;
-      status.textContent = "Ready. Return to your chat and confirm the quoted total before the quote expires.";
+      status.textContent = result.needsFreshQuote ? "Device ready. Return to the checkout card and refresh the total, then confirm it. You do not need to repeat preparation or type Done." : "Ready. Return to the checkout card and choose Confirm and pay. You do not need to type Done.";
       button.textContent = "Ready";
     } catch (e) { if (activeToken !== token) return; status.textContent = e.message || "Could not prepare payment. Use Wolt checkout."; button.disabled = false; }
   };

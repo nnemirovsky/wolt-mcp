@@ -5,7 +5,10 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, readdirSync } from 
 import { join, relative, isAbsolute } from "node:path";
 import { createRequire } from "node:module";
 import { currentStateDir, withStateDir } from "./context.js";
-import { attachPaymentContext } from "./order.js";
+import { attachPaymentContext, readQuote } from "./order.js";
+import { rememberBrowserContext } from "./browser-context.js";
+
+export const SETUP_LINK_TTL_MS = 10 * 60 * 1000;
 
 const require = createRequire(import.meta.url);
 export const paymentPage = () => readFileSync(new URL("../ui/payment-context.html", import.meta.url), "utf8");
@@ -32,7 +35,7 @@ export class PaymentContextService {
         if (JSON.parse(readFileSync(path, "utf8")).expiresAt <= Date.now()) unlinkSync(path);
       } catch { /* another request may already have consumed it */ }
     }
-    writeFileSync(this.file(token), JSON.stringify({ stateDir: currentStateDir(), quoteId: quote.id, expiresAt: quote.expiresAt }), { mode: 0o600 });
+    writeFileSync(this.file(token), JSON.stringify({ stateDir: currentStateDir(), quoteId: quote.id, expiresAt: Date.now() + SETUP_LINK_TTL_MS }), { mode: 0o600 });
     return `${this.publicUrl}/payment-context#${token}`;
   }
 
@@ -60,7 +63,15 @@ export class PaymentContextService {
     if (session.expiresAt <= Date.now()) { unlinkSync(this.file(token)); throw new Error("payment link expired; prepare a new quote"); }
     const rel = relative(this.stateDir, session.stateDir);
     if (rel.startsWith("..") || isAbsolute(rel)) throw new Error("invalid payment account");
-    const result = withStateDir(session.stateDir, () => attachPaymentContext({ quoteId: session.quoteId, browserInfo, deviceId }));
+    const result = withStateDir(session.stateDir, () => {
+      const quote = readQuote();
+      if (quote?.id === session.quoteId && quote.submittedAt) throw new Error("quote already submitted; check the order in Wolt");
+      if (quote?.id === session.quoteId && quote.expiresAt > Date.now()) return attachPaymentContext({ quoteId: session.quoteId, browserInfo, deviceId });
+      // A reprice must not make the user repeat device preparation. Save the
+      // real context, while leaving the expired quote unpayable.
+      rememberBrowserContext({ browserInfo, deviceId });
+      return { ok: true, needsFreshQuote: true };
+    });
     unlinkSync(this.file(token));
     return result;
   }

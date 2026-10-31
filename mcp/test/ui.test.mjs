@@ -11,7 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 process.env.WOLT_STATE_DIR = mkdtempSync(join(tmpdir(), "wolt-ui-"));
 const { buildServer } = await import("../server.mjs");
-const { rich, imageUrlOf, woltImageUrl, woltLinkUrl, RENDER_TOOLS, UI_RESOURCE_URI, UI_MIME, IMAGE_HOSTS, IMAGE_HINT } = await import("../lib/ui.js");
+const { rich, imageUrlOf, woltImageUrl, woltLinkUrl, RENDER_TOOLS, UI_RESOURCE_URI, UI_MIME, IMAGE_HOSTS, PAYMENT_HOSTS, IMAGE_HINT } = await import("../lib/ui.js");
 
 // show_picks takes URLs from the model: only Wolt's hosts pass.
 assert.equal(woltImageUrl("https://imageproxy.wolt.com/assets/abc"), "https://imageproxy.wolt.com/assets/abc");
@@ -51,11 +51,13 @@ assert.equal(res.mimeType, UI_MIME);
 assert.equal(res._meta?.ui?.prefersBorder, true);
 assert.deepEqual(res._meta?.ui?.csp?.resourceDomains, IMAGE_HOSTS, "image hosts are allowlisted for the widget");
 assert.deepEqual(res._meta?.["openai/widgetCSP"]?.resource_domains, IMAGE_HOSTS);
+assert.deepEqual(res._meta.ui.csp.connectDomains, PAYMENT_HOSTS);
 
 const read = await client.readResource({ uri: UI_RESOURCE_URI });
 const html = read.contents[0].text;
 assert.equal(read.contents[0].mimeType, UI_MIME);
 assert.match(html, /^<!doctype html>/i);
+assert.match(html, /ravelinjs 2\.3\.0/, "official SDK is bundled into the card without an external script fetch");
 assert.match(html, /"ui\/initialize"/, "speaks the MCP Apps handshake");
 assert.match(html, /ui\/notifications\/tool-result/);
 assert.match(html, /window\.openai/, "and ChatGPT's globals as a fallback");
